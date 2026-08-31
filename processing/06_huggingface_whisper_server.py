@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import threading
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -58,6 +60,80 @@ def make_handler(root: Path, service: WhisperService):
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=str(root), **kwargs)
+
+        def send_head(self):
+            """Serve static files with byte ranges, allowing long MP3s to seek."""
+            path = self.translate_path(self.path)
+            if os.path.isdir(path):
+                return super().send_head()
+            try:
+                source = open(path, "rb")
+            except OSError:
+                self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+                return None
+
+            self.byte_range: tuple[int, int] | None = None
+            size = os.fstat(source.fileno()).st_size
+            range_header = self.headers.get("Range")
+            if not range_header:
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", self.guess_type(path))
+                self.send_header("Content-Length", str(size))
+                self.send_header("Accept-Ranges", "bytes")
+                self.end_headers()
+                return source
+
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
+            if not match:
+                source.close()
+                self.send_error(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                return None
+            start_text, end_text = match.groups()
+            if not start_text and not end_text:
+                source.close()
+                self.send_error(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                return None
+            if start_text:
+                start = int(start_text)
+                end = int(end_text) if end_text else size - 1
+            else:
+                length = int(end_text)
+                start = max(size - length, 0)
+                end = size - 1
+            if start >= size or end < start:
+                source.close()
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return None
+            end = min(end, size - 1)
+            self.byte_range = (start, end)
+            self.send_response(HTTPStatus.PARTIAL_CONTENT)
+            self.send_header("Content-Type", self.guess_type(path))
+            self.send_header("Content-Length", str(end - start + 1))
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            return source
+
+        def copyfile(self, source, outputfile) -> None:
+            if self.byte_range is None:
+                super().copyfile(source, outputfile)
+                return
+            start, end = self.byte_range
+            source.seek(start)
+            remaining = end - start + 1
+            while remaining:
+                chunk = source.read(min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                try:
+                    outputfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    # Browsers routinely cancel an in-progress range while
+                    # seeking again; that is an expected client disconnect.
+                    break
+                remaining -= len(chunk)
 
         def send_json(self, status: int, payload: dict) -> None:
             encoded = json.dumps(payload).encode("utf-8")

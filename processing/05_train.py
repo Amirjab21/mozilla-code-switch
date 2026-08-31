@@ -32,7 +32,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from models.whisper_lid import load_token_lid_model, save_token_lid_checkpoint
+from models.whisper_lid import load_token_lid_lora_model, save_token_lid_lora_adapter
 from models.whisper_lid.decode import decode_with_token_language
 from models.whisper_lid.labels import IGNORE_INDEX, make_token_language_targets
 from run_config import apply_defaults, load_section
@@ -313,6 +313,23 @@ EVAL_CSV_FIELDS = [
     "language_id_loss",
 ]
 
+# One row per named run.  This is deliberately separate from the clip-level
+# evaluation CSVs so that runs can be compared without loading their examples.
+RUN_RESULTS_FIELDS = [
+    "run_name",
+    "evaluation_step",
+    "evaluated_at",
+    "evaluation_csv",
+    "clips",
+    "reference_words",
+    "word_errors",
+    "wer",
+    "loss",
+    "token_loss",
+    "language_id_loss",
+    "lid_accuracy",
+]
+
 
 def write_evaluation_csv(path: Path, rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -320,6 +337,44 @@ def write_evaluation_csv(path: Path, rows: list[dict[str, str]]) -> None:
         writer = csv.DictWriter(file, fieldnames=EVAL_CSV_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def upsert_run_results(
+    path: Path,
+    *,
+    run_name: str,
+    evaluation_step: int,
+    evaluation_csv: Path,
+    metrics: dict[str, float],
+) -> None:
+    """Record the best held-out aggregate metrics for one named training run."""
+    existing: list[dict[str, str]] = []
+    if path.exists():
+        with path.open(encoding="utf-8", newline="") as file:
+            existing = list(csv.DictReader(file))
+    record = {
+        "run_name": run_name,
+        "evaluation_step": str(evaluation_step),
+        "evaluated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "evaluation_csv": str(evaluation_csv),
+        "clips": str(int(metrics["eval/clips"])),
+        "reference_words": str(int(metrics["eval/reference_words"])),
+        "word_errors": str(round(metrics["eval/wer"] * metrics["eval/reference_words"])),
+        "wer": f"{metrics['eval/wer']:.10f}",
+        "loss": f"{metrics['eval/loss']:.10f}",
+        "token_loss": f"{metrics['eval/token_loss']:.10f}",
+        "language_id_loss": f"{metrics['eval/language_id_loss']:.10f}",
+        "lid_accuracy": f"{metrics['eval/lid_accuracy']:.10f}",
+    }
+    # A named configuration represents one comparable run; replace its row if
+    # the run is resumed and finds a better checkpoint.
+    existing = [row for row in existing if row.get("run_name") != run_name]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=RUN_RESULTS_FIELDS)
+        writer.writeheader()
+        writer.writerows(existing)
+        writer.writerow(record)
 
 
 def write_evaluation_html(path: Path, rows: list[dict[str, str]], run_name: str, best_eval_loss: float) -> None:
@@ -364,6 +419,9 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, default=Path("processed/train.csv"))
     parser.add_argument("--output-dir", type=Path, default=Path("processed/05_train"))
     parser.add_argument("--base-model", default="small")
+    parser.add_argument("--lora-rank", type=int, default=16)
+    parser.add_argument("--lora-alpha", type=int, default=32)
+    parser.add_argument("--lora-dropout", type=float, default=0.05)
     parser.add_argument("--download-root", type=Path, default=Path("models/whisper"))
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=4)
@@ -381,6 +439,12 @@ def main() -> None:
     parser.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="online")
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--analysis-dir", type=Path, default=Path("analysis/training_run_eval"))
+    parser.add_argument(
+        "--run-results-csv",
+        type=Path,
+        default=Path("analysis/training_run_results.csv"),
+        help="Run-level aggregate evaluation table, updated when this run improves.",
+    )
     apply_defaults(parser, config_values, config_args.config)
     args = parser.parse_args()
     if config_run_name and args.wandb_run_name is None:
@@ -414,7 +478,14 @@ def main() -> None:
     write_manifest(args.output_dir / "train_split.csv", train_rows)
     write_manifest(args.output_dir / "test_split.csv", test_rows)
 
-    model = load_token_lid_model(args.base_model, device=device, download_root=str(args.download_root))
+    model = load_token_lid_lora_model(
+        args.base_model,
+        rank=args.lora_rank,
+        alpha=args.lora_alpha,
+        dropout=args.lora_dropout,
+        device=device,
+        download_root=str(args.download_root),
+    )
     tokenizer = get_tokenizer(model.is_multilingual, num_languages=model.num_languages, language="en", task="transcribe")
     train_dataset = MiamiDataset(train_rows, tokenizer, model.dims.n_mels)
     eval_dataset = MiamiDataset(eval_rows, tokenizer, model.dims.n_mels)
@@ -445,6 +516,7 @@ def main() -> None:
     reached_step_limit = False
     best_eval_loss = float("inf")
     best_eval_rows: list[dict[str, str]] = []
+    run_label = str(run.name or args.wandb_run_name or "local")
 
     def run_evaluation(step: int) -> dict[str, float]:
         nonlocal best_eval_loss, best_eval_rows
@@ -454,8 +526,16 @@ def main() -> None:
         if metrics["eval/loss"] < best_eval_loss:
             best_eval_loss = metrics["eval/loss"]
             best_eval_rows = evaluation_rows
-            save_token_lid_checkpoint(model, args.output_dir / "best.pt")
-            write_evaluation_csv(args.output_dir / "best_eval_predictions.csv", best_eval_rows)
+            save_token_lid_lora_adapter(model, args.output_dir / "best_lora")
+            best_csv_path = args.output_dir / "best_eval_predictions.csv"
+            write_evaluation_csv(best_csv_path, best_eval_rows)
+            upsert_run_results(
+                args.run_results_csv,
+                run_name=run_label,
+                evaluation_step=step,
+                evaluation_csv=best_csv_path,
+                metrics=metrics,
+            )
         metrics["eval/best_loss"] = best_eval_loss
         wandb.log(metrics, step=step)
         print(
@@ -496,7 +576,7 @@ def main() -> None:
                 if args.max_train_steps is not None and global_step >= args.max_train_steps:
                     reached_step_limit = True
                     break
-            save_token_lid_checkpoint(model, args.output_dir / "last.pt")
+            save_token_lid_lora_adapter(model, args.output_dir / "last_lora")
             if reached_step_limit:
                 break
 
@@ -504,12 +584,13 @@ def main() -> None:
             run_evaluation(global_step)
         if not best_eval_rows:
             raise RuntimeError("No held-out evaluation rows were produced")
-        save_token_lid_checkpoint(model, args.output_dir / "final.pt")
+        save_token_lid_lora_adapter(model, args.output_dir / "final_lora")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_label = re.sub(r"[^A-Za-z0-9_-]+", "_", run.name or args.wandb_run_name or "local")
-        html_path = args.analysis_dir / f"{timestamp}_run_{run_label}.html"
+        safe_run_label = re.sub(r"[^A-Za-z0-9_-]+", "_", run_label)
+        html_path = args.analysis_dir / f"{timestamp}_run_{safe_run_label}.html"
         write_evaluation_html(html_path, best_eval_rows, run_label, best_eval_loss)
         run.summary["best_eval_loss"] = best_eval_loss
+        run.summary["best_lora_adapter"] = str(args.output_dir / "best_lora")
         run.summary["evaluation_csv"] = str(args.output_dir / "best_eval_predictions.csv")
         run.summary["evaluation_html"] = str(html_path)
         print(f"Wrote best held-out evaluation review to {html_path}")

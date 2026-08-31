@@ -5,6 +5,7 @@ This local fork retains Whisper's normal transcription head and adds a second cl
 ## Contents
 
 - `model.py` defines `WhisperTokenLID`, loads official Whisper weights with a freshly initialised `language_head`, and saves/loads fork checkpoints.
+- `model_lora.py` applies PEFT LoRA to every linear projection in Whisper's encoder and decoder. The language-ID head is excluded from LoRA but remains normally trainable and is saved with the adapter.
 - `labels.py` converts the existing `word_langids` JSON field into one target per Whisper BPE token. `eng&spa` is ignored for the auxiliary loss because it is an undetermined corpus label.
 - `decode.py` supplies greedy inference and returns BPE-level and pooled word-level language predictions.
 
@@ -23,6 +24,28 @@ PY
 ```
 
 The new head is random until fine-tuned; its predictions are not meaningful before training.
+
+## LoRA variant
+
+Synchronise the processing environment once to install PEFT, then load the LoRA version in place of the full-finetuning model:
+
+```bash
+uv sync --project processing
+uv run --project processing python - <<'PY'
+from models.whisper_lid import load_token_lid_lora_model
+
+model = load_token_lid_lora_model(
+    "small",
+    rank=16,
+    alpha=32,
+    dropout=0.05,
+    download_root="models/whisper",
+)
+model.print_trainable_parameters()
+PY
+```
+
+This freezes the original Whisper weights. The trainable parameters are the LoRA matrices in the encoder/decoder projections plus the full `decoder.language_head`; the embedding and normal Whisper token-output weights remain frozen.
 
 ## Training contract
 
