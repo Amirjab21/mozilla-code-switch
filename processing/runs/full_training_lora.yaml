@@ -1,0 +1,15 @@
+# Named full-data LoRA training configuration. `05_train.py` uses the PEFT
+# LoRA model; these settings explicitly document its adapter shape.
+run_name: full_training_lora
+
+train:
+  manifest: processed/train.csv
+  output_dir: processed/training_runs/full_training_lora
+  base_model: small
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  epochs: 3
+  batch_size: 2
+  wandb_project: miami-whisper-token-lid
+  wandb_mode: online

@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Training run evaluation</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #101522; color: #edf2ff; }
+    body { margin: 0; }
+    main { max-width: 1100px; margin: auto; padding: 28px 20px 50px; }
+    h1 { margin: 0 0 6px; } .muted { color: #aebbd0; }
+    .source, .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 18px 0; }
+    input[type="text"] { background: #192235; color: inherit; border: 1px solid #3b4c69; border-radius: 6px; padding: 9px; min-width: min(100%, 420px); }
+    button { background: #5379db; color: white; border: 0; border-radius: 6px; padding: 9px 12px; cursor: pointer; }
+    button:disabled { opacity: .45; cursor: default; } input[type="range"] { flex: 1; min-width: 180px; }
+    .card { background: #182132; border: 1px solid #2d3e5c; border-radius: 10px; padding: 20px; }
+    .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 10px; margin: 18px 0; }
+    .summary > div { background: #182132; border: 1px solid #2d3e5c; border-radius: 8px; padding: 12px; } .summary strong { display: block; font-size: 1.2rem; margin-top: 3px; }
+    audio { width: 100%; margin: 12px 0; } .label { display: block; color: #aebbd0; font-size: .78rem; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; margin: 20px 0 7px; }
+    .text { white-space: pre-wrap; line-height: 1.5; }
+    .tokens { display: flex; gap: 5px; flex-wrap: wrap; } .token { padding: 3px 6px; border-radius: 4px; background: #263247; font-size: .88rem; border-left: 4px solid #8493a9; }
+    .token.eng { background: #1d3d70; border-color: #2d7ff9; } .token.spa { background: #6a292f; border-color: #ed4545; } .token.mixed { background: #493667; border-color: #a875e8; } .token.other { background: #374151; border-color: #8493a9; }
+    .language-visualisation { overflow-x: auto; border: 1px solid #2d3e5c; border-radius: 7px; background: #101722; }
+    .language-track-label { display: block; padding: 10px 10px 4px; color: #aebbd0; font-size: .75rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+    .language-line, .ground-truth-words { display: flex; width: max-content; min-width: 100%; padding: 0 10px; box-sizing: border-box; }
+    .language-segment { height: 22px; box-sizing: border-box; border-right: 1px solid rgba(255,255,255,.45); flex: 0 0 auto; }
+    .ground-truth-words { padding-bottom: 10px; } .ground-truth-word { box-sizing: border-box; flex: 0 0 auto; padding: 5px 5px 0; text-align: center; line-height: 1.25; word-break: break-word; }
+    .eng { background: #2d7ff9; } .spa { background: #ed4545; } .mixed { background: #a875e8; } .other { background: #8493a9; }
+    .correct { background: #31b66a; } .incorrect { background: #df4d56; }
+    .aligned-predicted-word { box-sizing: border-box; flex: 0 0 auto; padding: 5px; text-align: center; line-height: 1.25; word-break: break-word; border-right: 1px solid rgba(255,255,255,.25); color: #fff; }
+    .error { color: #ffacac; white-space: pre-wrap; } code { color: #c8d7ff; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Training run evaluation</h1>
+    <p class="muted">Load any evaluation CSV with the five fields written by <code>05_train.py</code>. Audio paths are resolved from the configurable audio base.</p>
+    <section class="source">
+      <label>CSV path <input id="csvPath" type="text" aria-label="CSV path"></label>
+      <label>or choose CSV <input id="csvFile" type="file" accept=".csv,text/csv" aria-label="Choose CSV file"></label>
+      <label>Audio base <input id="audioBase" type="text" aria-label="Audio base"></label>
+      <button id="load">Load CSV</button>
+    </section>
+    <p id="status" class="muted">Choose a CSV and load it.</p>
+    <section id="summary" class="summary" hidden>
+      <div><span class="muted">Evaluation clips</span><strong id="summaryClips">—</strong></div>
+      <div><span class="muted">Aggregate WER</span><strong id="summaryWer">—</strong></div>
+      <div><span class="muted">Mean loss</span><strong id="summaryLoss">—</strong></div>
+      <div><span class="muted">Mean token loss</span><strong id="summaryTokenLoss">—</strong></div>
+      <div><span class="muted">Mean language-ID loss</span><strong id="summaryLanguageLoss">—</strong></div>
+    </section>
+    <section class="controls" hidden id="controls">
+      <label>Sort <select id="sort"><option value="original">Original order</option><option value="wer-desc">WER: highest first</option><option value="wer-asc">WER: lowest first</option><option value="loss-desc">Loss: highest first</option><option value="loss-asc">Loss: lowest first</option><option value="language_id_loss-desc">Language-ID loss: highest first</option><option value="language_id_loss-asc">Language-ID loss: lowest first</option><option value="token_loss-desc">Token loss: highest first</option><option value="token_loss-asc">Token loss: lowest first</option></select></label>
+      <button id="previous">← Previous</button><input id="position" type="range" min="0" value="0"><button id="next">Next →</button>
+    </section>
+    <section class="controls" hidden id="transcriptionControls">
+      <label>Hugging Face Whisper <select id="whisperModel"><option value="small" selected>Small</option><option value="medium">Medium</option></select></label>
+      <button id="transcribe">Whisper transcription</button><span id="transcriptionStatus" class="muted"></span>
+    </section>
+    <section id="viewer" class="card" hidden>
+      <strong id="title"></strong>
+      <audio id="audio" controls preload="metadata"></audio>
+      <span class="label">Clip metrics</span><div id="metrics" class="text"></div>
+      <span class="label">Predicted transcript</span><div id="prediction" class="text"></div>
+      <span class="label">On-demand Hugging Face Whisper transcript</span><div id="onDemandTranscript" class="text muted">Select a model and choose “Whisper transcription”.</div>
+      <span class="label">Ground-truth language labels</span><div id="referenceLabels" class="tokens"></div>
+      <span class="label">Language labels</span>
+      <div id="languageVisualisation" class="language-visualisation"></div>
+    </section>
+  </main>
+  <script>
+    const query = new URLSearchParams(location.search);
+    const defaults = {
+      csv: query.get('csv') || '../processed/training_preview/05_train/eval_predictions.csv',
+      audioBase: query.get('audio_base') || '..',
+    };
+    const state = { rows: [], originalRows: [], current: 0 };
+    const $ = id => document.getElementById(id);
+    $('csvPath').value = defaults.csv; $('audioBase').value = defaults.audioBase;
+
+    function parseCsv(text) {
+      const records = []; let row = [], field = '', quoted = false;
+      for (let index = 0; index < text.length; index += 1) {
+        const char = text[index];
+        if (quoted) {
+          if (char === '"' && text[index + 1] === '"') { field += '"'; index += 1; }
+          else if (char === '"') quoted = false;
+          else field += char;
+        } else if (char === '"') quoted = true;
+        else if (char === ',') { row.push(field); field = ''; }
+        else if (char === '\n') { row.push(field.replace(/\r$/, '')); records.push(row); row = []; field = ''; }
+        else field += char;
+      }
+      if (field || row.length) { row.push(field); records.push(row); }
+      const [headers, ...data] = records;
+      return data.filter(values => values.some(Boolean)).map(values => Object.fromEntries(headers.map((header, i) => [header, values[i] || ''])));
+    }
+    function parseLabels(value) { try { return JSON.parse(value); } catch { return []; } }
+    function languageClass(label) {
+      const lower = String(label || '').toLowerCase();
+      if (lower === 'eng') return 'eng'; if (lower === 'spa') return 'spa';
+      if (lower.includes('+') || lower === 'mixed') return 'mixed'; return 'other';
+    }
+    function wordWidth(word) { return Math.max(44, Math.min(180, String(word).length * 9 + 20)); }
+    function trackLabel(text) { const label = document.createElement('span'); label.className = 'language-track-label'; label.textContent = text; return label; }
+    function normaliseForAlignment(word) { return String(word || '').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, ''); }
+    function alignPredictedLabels(groundTruth, predicted) {
+      // Map each reference word to its best predicted-word counterpart. This makes
+      // the two language tracks share one visual word grid even when ASR inserts,
+      // deletes, or substitutes words.
+      const rows = groundTruth.length, columns = predicted.length;
+      const distances = Array.from({ length: rows + 1 }, () => Array(columns + 1).fill(0));
+      for (let row = 0; row <= rows; row += 1) distances[row][0] = row;
+      for (let column = 0; column <= columns; column += 1) distances[0][column] = column;
+      for (let row = 1; row <= rows; row += 1) for (let column = 1; column <= columns; column += 1) {
+        const substitution = distances[row - 1][column - 1] + (normaliseForAlignment(groundTruth[row - 1].word) === normaliseForAlignment(predicted[column - 1].word) ? 0 : 1);
+        distances[row][column] = Math.min(substitution, distances[row - 1][column] + 1, distances[row][column - 1] + 1);
+      }
+      const aligned = Array(rows).fill(null); let row = rows, column = columns;
+      while (row > 0 || column > 0) {
+        const same = row > 0 && column > 0 && normaliseForAlignment(groundTruth[row - 1].word) === normaliseForAlignment(predicted[column - 1].word);
+        const diagonal = row > 0 && column > 0 && distances[row][column] === distances[row - 1][column - 1] + (same ? 0 : 1);
+        if (diagonal) { aligned[row - 1] = predicted[column - 1]; row -= 1; column -= 1; }
+        else if (row > 0 && distances[row][column] === distances[row - 1][column] + 1) row -= 1;
+        else column -= 1;
+      }
+      return aligned;
+    }
+    function languageLine(labels, predicted, widthWords = labels) {
+      const line = document.createElement('div'); line.className = 'language-line';
+      labels.forEach((item, index) => {
+        const segment = document.createElement('div');
+        const label = item ? (predicted ? item.language_id : item.langid) : 'other';
+        const confidence = item && predicted && Number.isFinite(Number(item.confidence)) ? Number(item.confidence) : 0.18;
+        segment.className = `language-segment ${languageClass(label)}`;
+        segment.style.width = `${wordWidth(widthWords[index].word)}px`;
+        segment.style.opacity = predicted ? Math.max(0, Math.min(1, confidence)) : '1';
+        segment.title = item ? `${item.word} · ${label || 'unknown'}${predicted ? ` · ${(confidence * 100).toFixed(1)}% confidence` : ''}` : `${widthWords[index].word} · no aligned Whisper word`;
+        line.append(segment);
+      });
+      return line;
+    }
+    function groundTruthWords(labels) {
+      const words = document.createElement('div'); words.className = 'ground-truth-words';
+      labels.forEach(item => {
+        const word = document.createElement('div'); word.className = 'ground-truth-word';
+        word.style.width = `${wordWidth(item.word)}px`; word.textContent = item.word;
+        words.append(word);
+      });
+      return words;
+    }
+    function predictedWords(groundTruth, alignedPredicted) {
+      const words = document.createElement('div'); words.className = 'ground-truth-words';
+      groundTruth.forEach((reference, index) => {
+        const predicted = alignedPredicted[index]; const correct = predicted && normaliseForAlignment(reference.word) === normaliseForAlignment(predicted.word);
+        const word = document.createElement('div'); word.className = `aligned-predicted-word ${correct ? 'correct' : 'incorrect'}`;
+        word.style.width = `${wordWidth(reference.word)}px`; word.textContent = predicted ? predicted.word : '—';
+        word.title = predicted ? `Predicted: ${predicted.word} · ${correct ? 'correct word' : 'incorrect word'}` : 'No aligned Whisper word';
+        words.append(word);
+      });
+      return words;
+    }
+    function renderLanguageVisualisation(groundTruth, predicted) {
+      const container = $('languageVisualisation'); container.replaceChildren();
+      if (!groundTruth.length) { container.textContent = 'No ground-truth language labels'; return; }
+      const alignedPredicted = alignPredictedLabels(groundTruth, predicted);
+      container.append(trackLabel('Predicted language labels — opacity represents confidence'));
+      container.append(predicted.length ? languageLine(alignedPredicted, true, groundTruth) : document.createTextNode('No predicted labels'));
+      container.append(trackLabel('Ground-truth language labels'));
+      container.append(languageLine(groundTruth, false, groundTruth));
+      container.append(trackLabel('Ground-truth transcript'));
+      container.append(groundTruthWords(groundTruth));
+      container.append(predictedWords(groundTruth, alignedPredicted));
+    }
+    function renderReferenceLabels(labels) {
+      const container = $('referenceLabels'); container.replaceChildren();
+      labels.forEach(item => {
+        const token = document.createElement('span'); token.className = `token ${languageClass(item.langid)}`;
+        token.textContent = `${item.word} · ${item.langid || 'unknown'}`; container.append(token);
+      });
+      if (!labels.length) container.textContent = 'No ground-truth language labels';
+    }
+    function resolveAudioPath(path) {
+      if (/^(https?:|file:|data:)/i.test(path) || path.startsWith('/')) return path;
+      const base = $('audioBase').value.trim().replace(/\/$/, '');
+      return `${base}/${path}`.replace(/([^:]\/)\/+/, '$1');
+    }
+    function setSummary(rows) {
+      const numericMean = field => {
+        const values = rows.map(row => Number(row[field])).filter(Number.isFinite);
+        return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+      };
+      const format = value => value === null ? 'not available' : value.toFixed(4);
+      const totalReferences = rows.reduce((sum, row) => sum + (Number(row.reference_words) || 0), 0);
+      const totalErrors = rows.reduce((sum, row) => sum + (Number(row.word_errors) || 0), 0);
+      const wer = totalReferences ? totalErrors / totalReferences : numericMean('wer');
+      $('summaryClips').textContent = rows.length;
+      $('summaryWer').textContent = wer === null ? 'not available' : `${(wer * 100).toFixed(1)}%`;
+      $('summaryLoss').textContent = format(numericMean('loss'));
+      $('summaryTokenLoss').textContent = format(numericMean('token_loss'));
+      $('summaryLanguageLoss').textContent = format(numericMean('language_id_loss'));
+      $('summary').hidden = false;
+    }
+    function show() {
+      const row = state.rows[state.current]; if (!row) return;
+      $('position').value = state.current; $('position').max = Math.max(state.rows.length - 1, 0);
+      $('title').textContent = `Clip ${state.current + 1} of ${state.rows.length}: ${row.audio_file_path}`;
+      $('audio').src = resolveAudioPath(row.audio_file_path);
+      const format = value => Number.isFinite(Number(value)) ? Number(value).toFixed(4) : 'not available';
+      $('metrics').textContent = `WER: ${format(row.wer)} · Loss: ${format(row.loss)} · Language-ID loss: ${format(row.language_id_loss)} · Token loss: ${format(row.token_loss)}`;
+      $('prediction').textContent = row.predicted_transcript;
+      $('onDemandTranscript').textContent = 'Select a model and choose “Whisper transcription”.';
+      $('transcriptionStatus').textContent = '';
+      const groundTruthLabels = parseLabels(row.language_labels);
+      renderReferenceLabels(groundTruthLabels);
+      renderLanguageVisualisation(groundTruthLabels, parseLabels(row.predicted_language_labels));
+    }
+    function sortRows() {
+      const [field, direction] = $('sort').value.split('-');
+      state.rows = state.originalRows.slice(); state.current = 0;
+      if (field === 'original') { show(); return; }
+      const multiplier = direction === 'desc' ? -1 : 1;
+      state.rows.sort((left, right) => multiplier * ((Number(left[field]) || 0) - (Number(right[field]) || 0)));
+      show();
+    }
+    function displayRows(rows, source, updateUrl) {
+      const required = ['audio_file_path', 'ground_truth_transcript', 'language_labels', 'predicted_transcript', 'predicted_language_labels'];
+      if (!rows.length || required.some(key => !(key in rows[0]))) throw new Error('This is not an evaluation CSV written by 05_train.py.');
+      state.originalRows = rows; state.rows = rows.slice(); state.current = 0;
+      $('viewer').hidden = false; $('controls').hidden = false; $('transcriptionControls').hidden = false;
+      setSummary(rows);
+      $('status').className = 'muted'; $('status').textContent = `Loaded ${rows.length} evaluation clips from ${source}`;
+      if (updateUrl) {
+        const url = new URL(location); url.searchParams.set('csv', $('csvPath').value.trim()); url.searchParams.set('audio_base', $('audioBase').value.trim()); history.replaceState(null, '', url);
+      }
+      show();
+    }
+    async function loadCsv() {
+      const csvPath = $('csvPath').value.trim(); const selectedFile = $('csvFile').files[0];
+      $('status').className = 'muted'; $('status').textContent = 'Loading…';
+      try {
+        if (selectedFile) displayRows(parseCsv(await selectedFile.text()), selectedFile.name, false);
+        else {
+          const response = await fetch(csvPath);
+          if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+          displayRows(parseCsv(await response.text()), csvPath, true);
+        }
+      } catch (error) {
+        $('viewer').hidden = true; $('controls').hidden = true; $('transcriptionControls').hidden = true; $('summary').hidden = true;
+        $('status').className = 'error';
+        $('status').textContent = `Could not load CSV: ${error.message}\nServe the repository root (for example: python3 -m http.server) rather than opening this page with file://.`;
+      }
+    }
+    $('load').onclick = loadCsv;
+    $('previous').onclick = () => { state.current = (state.current + state.rows.length - 1) % state.rows.length; show(); };
+    $('next').onclick = () => { state.current = (state.current + 1) % state.rows.length; show(); };
+    $('position').oninput = event => { state.current = Number(event.target.value); show(); };
+    $('sort').onchange = sortRows;
+    $('transcribe').onclick = async () => {
+      const row = state.rows[state.current]; if (!row) return;
+      const button = $('transcribe'); const status = $('transcriptionStatus');
+      button.disabled = true; status.className = 'muted'; status.textContent = 'Transcribing… the first use of a model may download its checkpoint.';
+      try {
+        const response = await fetch('/api/transcribe', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ audio_path: row.audio_file_path, model: $('whisperModel').value }),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `${response.status} ${response.statusText}`);
+        $('onDemandTranscript').textContent = result.transcript;
+        status.textContent = `Completed with Hugging Face Whisper ${result.model}.`;
+      } catch (error) {
+        status.className = 'error';
+        status.textContent = `Transcription failed: ${error.message}. Start processing/06_huggingface_whisper_server.py instead of python -m http.server.`;
+      } finally { button.disabled = false; }
+    };
+    loadCsv();
+  </script>
+</body>
+</html>

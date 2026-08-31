@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bangor Miami Corpus — Audio Explorer</title>
+  <style>
+    :root { color-scheme: light; --ink:#17212b; --muted:#61707d; --paper:#f8f6f1; --panel:#fff; --line:#dbe1e5; --accent:#e95f36; --navy:#12334a; --spa:#fff0d6; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--paper); color:var(--ink); font:16px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    header { background:var(--navy); color:white; padding:clamp(2rem,6vw,5.5rem) 1.5rem 2.5rem; }
+    .wrap { width:min(1180px,calc(100% - 2rem)); margin:auto; }
+    .eyebrow { margin:0 0 .7rem; color:#9ed3d6; font-size:.75rem; font-weight:800; letter-spacing:.13em; text-transform:uppercase; }
+    h1 { max-width:800px; margin:0; font-size:clamp(2rem,5vw,4rem); line-height:1.05; letter-spacing:-.04em; }
+    header p:last-child { max-width:650px; color:#d8e6e9; margin:1.2rem 0 0; }
+    main { padding:2rem 0 4rem; }
+    .controls { display:grid; grid-template-columns:minmax(220px,1fr) minmax(180px,300px); gap:1rem; margin-bottom:1.5rem; }
+    label { display:grid; gap:.35rem; font-size:.84rem; color:var(--muted); font-weight:700; }
+    select,input { width:100%; padding:.8rem .9rem; border:1px solid var(--line); border-radius:.5rem; background:white; color:var(--ink); font:inherit; }
+    .layout { display:grid; grid-template-columns:minmax(260px,.75fr) minmax(0,2fr); gap:1.5rem; align-items:start; }
+    .card { background:var(--panel); border:1px solid var(--line); border-radius:.75rem; box-shadow:0 3px 13px #12293d0a; }
+    .player { padding:1.25rem; position:sticky; top:1rem; }
+    h2 { font-size:1.15rem; margin:0 0 1rem; }
+    audio { width:100%; margin:.25rem 0 1.1rem; }
+    dl { margin:0; display:grid; gap:.75rem; }
+    dt { color:var(--muted); font-size:.72rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
+    dd { margin:.12rem 0 0; }
+    .source-links { display:flex; flex-wrap:wrap; gap:.5rem; margin-top:1.4rem; }
+    .source-links a { color:var(--navy); font-size:.86rem; font-weight:700; }
+    .player-help { margin:0 0 1rem; color:var(--muted); font-size:.78rem; }
+    .transcript-head { display:flex; align-items:baseline; justify-content:space-between; gap:1rem; padding:1.25rem 1.25rem .85rem; border-bottom:1px solid var(--line); }
+    .transcript-help { color:var(--muted); font-size:.78rem; font-weight:500; }
+    .count { color:var(--muted); font-size:.85rem; white-space:nowrap; }
+    .utterances { max-height:70vh; overflow:auto; padding:.3rem 0; }
+    .utterance { display:block; width:100%; padding:1rem 1.25rem; border:0; border-bottom:1px solid #edf0f2; background:transparent; color:inherit; text-align:left; font:inherit; cursor:pointer; scroll-margin-top:1rem; }
+    .utterance:last-child { border-bottom:0; }
+    .utterance.active { background:#e7f4f3; border-left:4px solid #2b9b99; padding-left:calc(1.25rem - 4px); }
+    .utterance.hidden { display:none; }
+    .utterance:focus-visible { outline:3px solid #2b9b99; outline-offset:-3px; }
+    .speaker { color:var(--accent); font-size:.75rem; font-weight:900; letter-spacing:.08em; }
+    .time { float:right; color:var(--muted); font-size:.78rem; font-variant-numeric:tabular-nums; }
+    .text { display:block; margin:.22rem 0 0; font-size:1.02rem; }
+    .translation { display:block; margin:.35rem 0 0; color:var(--muted); font-size:.92rem; font-style:italic; }
+    .lang-spa { background:var(--spa); }
+    .empty,.loading { padding:2rem 1.25rem; color:var(--muted); text-align:center; }
+    @media (max-width:760px) { .controls,.layout { grid-template-columns:1fr; } .player { position:static; } .utterances { max-height:none; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <p class="eyebrow">Bangor Miami Spanish–English Corpus</p>
+      <h1>Listen closely. Read in context.</h1>
+      <p>Choose a recording to play its source audio alongside the aligned CHAT transcript, speaker information, language tags, and English translations where available.</p>
+    </div>
+  </header>
+  <main class="wrap">
+    <div class="controls">
+      <label>Recording <select id="recording" aria-label="Choose a recording"></select></label>
+      <label>Find in this transcript <input id="search" type="search" placeholder="e.g. familia or school"></label>
+    </div>
+    <div class="layout">
+      <aside class="card player">
+        <h2 id="recordingTitle">Recording</h2>
+        <audio id="audio" controls preload="metadata"></audio>
+        <p class="player-help">For instant seeking in long recordings, serve this page with <code>processing/06_huggingface_whisper_server.py</code>.</p>
+        <dl id="metadata"></dl>
+        <div class="source-links"><a id="chatLink" target="_blank">Open CHAT source</a><a id="tsvLink" target="_blank">Open word-level TSV</a></div>
+      </aside>
+      <section class="card" aria-label="Transcript">
+        <div class="transcript-head"><h2>Transcript <span class="transcript-help">Click a timed line to seek</span></h2><span class="count" id="count"></span></div>
+        <div id="utterances" class="utterances"><p class="loading">Loading transcript…</p></div>
+      </section>
+    </div>
+  </main>
+  <script>
+    const select = document.querySelector('#recording'), audio = document.querySelector('#audio');
+    const transcript = document.querySelector('#utterances'), metadata = document.querySelector('#metadata');
+    const search = document.querySelector('#search'), count = document.querySelector('#count');
+    const query = new URLSearchParams(location.search);
+    const configParameter = query.get('config') || '../dataset.json';
+    const configUrl = new URL(configParameter, location.href);
+    let entries = [], dataset;
+
+    const clean = value => value.replace(/\d+_\d+/g, '').replace(/\[[-+].*?\]/g, '').replace(/@s:[\w&+]+/g, '').replace(/\s+/g, ' ').trim();
+    const clock = ms => { const total = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(total/60)}:${String(total%60).padStart(2,'0')}`; };
+    const escape = value => value.replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[char]);
+    const assetUrl = (directory, filename) => new URL(`${dataset.paths[directory].replace(/\/?$/, '/')}${filename}`, configUrl).href;
+
+    function parseChat(text) {
+      const header = {}; entries = []; let current;
+      for (const line of text.replace(/\r/g,'').split('\n')) {
+        if (line.startsWith('@')) { const match = line.match(/^@([^:]+):\s*(.*)$/); if (match) header[match[1]] = match[2]; continue; }
+        const speech = line.match(/^\*([^:]+):\s*(.*)$/);
+        if (speech) {
+          const ticks = speech[2].match(/(\d+)_(\d+)/);
+          current = { speaker:speech[1], text:clean(speech[2]), start:ticks ? +ticks[1] : null, end:ticks ? +ticks[2] : null, translation:'' };
+          entries.push(current);
+        } else if (current && line.startsWith('%eng:')) current.translation = clean(line.slice(5));
+      }
+      return header;
+    }
+    function showMetadata(header, name) {
+      const fields = [['Participants',header.Participants],['Situation',header.Situation],['Date',header.Date],['Duration',header['Time Duration']],['Languages',header.Languages]];
+      metadata.innerHTML = fields.filter(([,value]) => value).map(([label,value]) => `<div><dt>${label}</dt><dd>${escape(value)}</dd></div>`).join('');
+      document.querySelector('#recordingTitle').textContent = name;
+    }
+    function render() {
+      transcript.innerHTML = entries.map((item, i) => `<button type="button" class="utterance" data-index="${i}" data-start="${item.start ?? ''}" ${item.start === null ? 'disabled' : ''} aria-label="Seek to ${item.start === null ? 'an untimed transcript entry' : clock(item.start)}: ${escape(item.text)}"><span class="speaker">${escape(item.speaker)}</span>${item.start !== null ? `<span class="time">${clock(item.start)}–${clock(item.end)}</span>` : ''}<span class="text">${escape(item.text)}</span>${item.translation ? `<span class="translation">${escape(item.translation)}</span>` : ''}</button>`).join('') || '<p class="empty">No utterances found in this CHAT file.</p>';
+      filter();
+    }
+    function filter() {
+      const term = search.value.trim().toLocaleLowerCase(); let visible = 0;
+      document.querySelectorAll('.utterance').forEach(row => { const matched = !term || row.textContent.toLocaleLowerCase().includes(term); row.classList.toggle('hidden', !matched); if (matched) visible++; });
+      count.textContent = `${visible} of ${entries.length} utterances`;
+    }
+    async function load() {
+      const name = select.value;
+      const nextQuery = new URLSearchParams(); if (query.has('config')) nextQuery.set('config', configParameter); nextQuery.set('recording', name);
+      history.replaceState(null, '', `?${nextQuery}`);
+      audio.src = assetUrl('audio_dir', `${name}.mp3`); audio.load(); search.value = '';
+      document.querySelector('#chatLink').href = assetUrl('chat_dir', `${name}.cha`);
+      document.querySelector('#tsvLink').href = assetUrl('word_tsv_dir', `${name}_cgwords.tsv`);
+      transcript.innerHTML = '<p class="loading">Loading transcript…</p>';
+      try { const response = await fetch(assetUrl('chat_dir', `${name}.cha`)); if (!response.ok) throw new Error(response.status); const header = parseChat(await response.text()); showMetadata(header, name); render(); }
+      catch (error) { transcript.innerHTML = '<p class="empty">The transcript could not be loaded. Check the dataset configuration and serve the files with a local web server.</p>'; count.textContent = ''; }
+    }
+    audio.addEventListener('timeupdate', () => {
+      const time = audio.currentTime * 1000; let active = null;
+      document.querySelectorAll('.utterance').forEach(row => { const index = +row.dataset.index, entry = entries[index]; const isActive = entry.start !== null && time >= entry.start && time <= entry.end; row.classList.toggle('active', isActive); if (isActive) active = row; });
+      if (active && !active.dataset.scrolled) { active.parentElement.scrollTop = active.offsetTop - active.parentElement.offsetTop - 55; active.dataset.scrolled = 'true'; }
+    });
+    audio.addEventListener('seeked', () => document.querySelectorAll('.utterance').forEach(row => delete row.dataset.scrolled));
+    function seekToUtterance(startMs) {
+      const seek = () => {
+        const requestedTime = startMs / 1000;
+        // CHAT timestamps are in milliseconds. Clamp only once metadata has
+        // loaded, so a seek never lands beyond a shorter media file.
+        audio.currentTime = Number.isFinite(audio.duration) ? Math.min(requestedTime, audio.duration) : requestedTime;
+        audio.play().catch(() => {});
+      };
+      if (audio.readyState >= HTMLMediaElement.HAVE_METADATA) seek();
+      else audio.addEventListener('loadedmetadata', seek, { once:true });
+    }
+    transcript.addEventListener('click', event => {
+      const row = event.target.closest('.utterance');
+      if (row?.dataset.start !== undefined && row.dataset.start !== '') seekToUtterance(Number(row.dataset.start));
+    });
+    select.addEventListener('change', load); search.addEventListener('input', filter);
+    fetch(configUrl).then(response => { if (!response.ok) throw Error(response.status); return response.json(); }).then(config => {
+      dataset = config; document.title = `${dataset.title || 'Corpus'} — Audio Explorer`;
+      (dataset.recordings || []).forEach(name => select.add(new Option(name.replace(/(\D)(\d)/, '$1 $2'), name)));
+      select.value = query.get('recording') || dataset.default_recording || dataset.recordings?.[0] || '';
+      if (!select.value) throw Error('No recordings were supplied in the dataset configuration.');
+      load();
+    }).catch(() => { transcript.innerHTML = '<p class="empty">The dataset configuration could not be loaded. Use <code>?config=path/to/dataset.json</code> and serve the files with a local web server.</p>'; });
+  </script>
+</body>
+</html>

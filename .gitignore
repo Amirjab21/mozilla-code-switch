@@ -1,0 +1,14 @@
+miami/
+miami/*
+*.wav
+
+__pycache__
+
+*.pt
+.env
+
+.DS_Store
+
+wandb
+training_preview
+processed/preview

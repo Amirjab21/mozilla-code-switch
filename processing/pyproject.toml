@@ -1,0 +1,20 @@
+[project]
+name = "miami-corpus-processing"
+version = "0.1.0"
+description = "Prepare timestamp-aligned Bangor Miami corpus clips for speech-model training."
+requires-python = ">=3.10,<3.14"
+dependencies = [
+  "numpy>=1.26",
+  "openai-whisper",
+  "peft>=0.14",
+  "python-dotenv>=1.0",
+  "pyyaml>=6.0",
+  "silero-vad>=5.1.2",
+  "torch>=2.0",
+  "torchaudio>=2.0",
+  "transformers>=4.48",
+  "wandb>=0.19",
+]
+
+[tool.uv]
+package = false

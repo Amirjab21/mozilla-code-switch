@@ -1,0 +1,11 @@
+# Named training configuration. Processing is performed separately into `processed/`.
+run_name: full_training
+
+train:
+  manifest: processed/train.csv
+  output_dir: processed/training_runs/full_training
+  base_model: small
+  epochs: 3
+  batch_size: 2
+  wandb_project: miami-whisper-token-lid
+  wandb_mode: online
