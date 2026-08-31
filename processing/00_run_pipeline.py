@@ -32,7 +32,8 @@ def main() -> None:
     parser.add_argument("--max-recordings", type=int, help="Process only the first N recordings (for previews).")
     parser.add_argument("--max-segments-per-recording", type=int, help="Keep only the first N segments from each recording.")
     parser.add_argument("--threshold", type=float, default=0.5)
-    parser.add_argument("--merge-gap-ms", type=int, default=20)
+    parser.add_argument("--merge-gap-ms", type=int, default=2000,
+                        help="Keep VAD pauses up to this duration within a clip (default: 2000 ms).")
     parser.add_argument("--ffmpeg", default="ffmpeg")
     parser.add_argument("--skip-inference", action="store_true", help="Skip step 4 Whisper language inference.")
     parser.add_argument("--inference-model", default="medium", help="Whisper model name for step 4.")

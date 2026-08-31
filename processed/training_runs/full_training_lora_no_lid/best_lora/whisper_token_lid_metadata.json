@@ -1,0 +1,22 @@
+{
+  "format": "whisper-token-lid-lora-v1",
+  "base_model": "small",
+  "dims": {
+    "n_mels": 80,
+    "n_audio_ctx": 1500,
+    "n_audio_state": 768,
+    "n_audio_head": 12,
+    "n_audio_layer": 12,
+    "n_vocab": 51865,
+    "n_text_ctx": 448,
+    "n_text_state": 768,
+    "n_text_head": 12,
+    "n_text_layer": 12
+  },
+  "language_labels": [
+    "eng",
+    "spa",
+    "mixed",
+    "other"
+  ]
+}

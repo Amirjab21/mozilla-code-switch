@@ -53,11 +53,11 @@ Key options: `--max-seconds` (default `20`), `--audio-dir`, `--chat-dir`, `--tsv
 
 ## Stage 2 — Silero voice activity detection
 
-`02_vad_trim.py` reads `01_segments.csv`, decodes each source WAV to mono 16 kHz PCM through `ffmpeg`, and passes the samples to Silero VAD. A speech probability threshold of `0.5` is used by default. Adjacent speech regions separated by 20 ms or less are merged, then the retained regions are concatenated to remove non-speech audio. The resulting clips are written as mono, signed 16-bit PCM WAVs at 16 kHz.
+`02_vad_trim.py` reads `01_segments.csv`, decodes each source WAV to mono 16 kHz PCM through `ffmpeg`, and passes the samples to Silero VAD. A speech probability threshold of `0.5` is used by default. Pauses shorter than or equal to 2 seconds remain in place within a retained clip. Only a detected silence longer than 2 seconds creates separate speech regions, which are then concatenated to remove that longer non-speech interval. The resulting clips are written as mono, signed 16-bit PCM WAVs at 16 kHz.
 
 Rows containing no detected speech are kept in `02_vad.csv` with `filtered_out=True`; rows with speech are written to `02_vad/` and marked `filtered_out=False`. This makes rejected material inspectable without retaining a VAD output clip. The script decodes with `ffmpeg` rather than TorchCodec to avoid macOS audio-library compatibility issues.
 
-Key options: `--threshold` (default `0.5`), `--merge-gap-ms` (default `20`), `--manifest`, `--output-dir`, and `--output-manifest`.
+Key options: `--threshold` (default `0.5`), `--merge-gap-ms` (default `2000`), `--manifest`, `--output-dir`, and `--output-manifest`.
 
 ## Stage 3 — final normalization
 
@@ -97,9 +97,18 @@ The script makes a deterministic 90/10 train/test split with seed `1337`. It hol
 
 At every 250 training steps by default, it evaluates on a fixed held-out subset of up to 100 clips. The evaluation logs combined `eval/loss`, separate token and language-ID losses, token-language accuracy, and greedy-decoding WER to Weights & Biases. These constants are defined at the top of `05_train.py` as `EVAL_EVERY_STEPS` and `EVAL_SET_SIZE`; command-line options can override them for one run.
 
-`best_eval_loss` starts at infinity and is updated whenever a lower held-out `eval/loss` is observed. The corresponding compact PEFT adapter is saved as `best_lora/`. Each evaluation overwrites `eval_predictions.csv`; the best result is preserved as `best_eval_predictions.csv`. Both CSVs contain `audio_file_path`, the ground-truth transcript and language labels, predicted transcript and word-level predicted language labels, plus clip-level `wer`, `loss`, `token_loss`, and `language_id_loss`.
+`best_eval_loss` starts at infinity and is updated whenever a lower held-out `eval/loss` is observed. The corresponding checkpoint is saved by the selected `--method`: a compact PEFT adapter directory (`best_lora/`) for LoRA, or a full `best.pt` fork checkpoint for full-parameter fine-tuning. Each evaluation overwrites `eval_predictions.csv`; the best result is preserved as `best_eval_predictions.csv`. Both CSVs contain `audio_file_path`, the ground-truth transcript and language labels, predicted transcript and word-level predicted language labels, plus clip-level `wer`, `loss`, `token_loss`, and `language_id_loss`.
 
 At completion, the script writes a self-contained audio review page for the best evaluation result to `analysis/training_run_eval/{datetime}_run_{runname}.html`. It has previous/next controls, an audio player for every held-out clip, and sorts by WER, combined loss, token loss, or language-ID loss. W&B receives only scalar training/evaluation metrics; audio is never uploaded. The local evaluation CSV preserves the audio paths used by the local HTML review page.
+
+### ASR-only LoRA ablation
+
+To test whether the language-ID objective improves WER, run `full_training_lora_no_lid.yaml`. It uses the same LoRA shape, split seed, Whisper base model, and training settings as the regular full LoRA run, but sets `lid_loss_weight: 0.0`. This freezes the language-ID head and trains the encoder/decoder LoRA adapters from ASR token cross-entropy only. Its `language_id_loss` column is therefore `0` and LID accuracy is unavailable; compare its best held-out `WER` in `analysis/training_run_results.csv` with the regular run.
+
+```sh
+uv run --project processing python processing/05_train.py \
+  --config processing/runs/full_training_lora_no_lid.yaml
+```
 
 For a reusable CSV viewer, open `analysis/training-run-evaluation.html` through a local web server. It defaults to the training preview CSV and can be pointed at another output using its inputs or a URL such as `analysis/training-run-evaluation.html?csv=../processed/05_train/eval_predictions.csv&audio_base=..`.
 
@@ -129,7 +138,7 @@ uv run --project processing python processing/05_train.py \
   --wandb-project miami-whisper-token-lid
 ```
 
-For a no-upload smoke test, pass `--wandb-mode disabled`. Training saves `last_lora/` after each epoch and `final_lora/` at completion; these are compact PEFT adapters containing the LoRA weights and the language-ID head, not duplicate Whisper base weights.
+For a no-upload smoke test, pass `--wandb-mode disabled`. Choose `--method lora` (the default) or `--method full`. LoRA saves `last_lora/` after each epoch and `final_lora/` at completion; these are compact PEFT adapters containing the LoRA weights and the language-ID head, not duplicate Whisper base weights. Full-parameter training writes `last.pt` and `final.pt` instead.
 
 ### Limited training preview
 
@@ -175,7 +184,7 @@ uv run --project processing python processing/05_train.py \
   --wandb-mode disabled
 ```
 
-This creates the deterministic 90/10 split, evaluates at steps 5 and 10, writes WER and language-ID metrics, and saves `last_lora/` and `final_lora/`. Once the local smoke test succeeds, remove `--wandb-mode disabled` to log online using `WANDB_API_KEY` from `.env`.
+This creates the deterministic 90/10 split, evaluates at steps 5 and 10, writes WER and language-ID metrics, and saves the method's last and final checkpoints (`last_lora/` and `final_lora/` by default). Once the local smoke test succeeds, remove `--wandb-mode disabled` to log online using `WANDB_API_KEY` from `.env`.
 
 ## Preview run
 

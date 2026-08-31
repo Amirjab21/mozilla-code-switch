@@ -32,7 +32,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from models.whisper_lid import load_token_lid_lora_model, save_token_lid_lora_adapter
+from models.whisper_lid import make_finetune_method
 from models.whisper_lid.decode import decode_with_token_language
 from models.whisper_lid.labels import IGNORE_INDEX, make_token_language_targets
 from run_config import apply_defaults, load_section
@@ -43,7 +43,7 @@ TRAIN_FRACTION = 0.90
 SPLIT_SEED = 1337
 EVAL_SET_SIZE = 100
 EVAL_EVERY_STEPS = 250
-LID_LOSS_WEIGHT = 0.30
+DEFAULT_LID_LOSS_WEIGHT = 0.30
 
 
 def select_device(value: str) -> torch.device:
@@ -202,7 +202,21 @@ def collate_batch(items: list[dict[str, Any]], tokenizer) -> dict[str, Any]:
     }
 
 
-def model_losses(model, batch: dict[str, Any], device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
+def freeze_language_head(model) -> int:
+    """Freeze both PEFT and base-model copies of the token language-ID head."""
+    frozen_parameters = 0
+    for name, parameter in model.named_parameters():
+        if "language_head" in name:
+            parameter.requires_grad_(False)
+            frozen_parameters += parameter.numel()
+    if frozen_parameters == 0:
+        raise RuntimeError("Could not find a language_head parameter to freeze")
+    return frozen_parameters
+
+
+def model_losses(
+    model, batch: dict[str, Any], device: torch.device, lid_loss_weight: float
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
     mels = batch["mels"].to(device)
     inputs = batch["inputs"].to(device)
     asr_targets = batch["asr_targets"].to(device)
@@ -211,18 +225,20 @@ def model_losses(model, batch: dict[str, Any], device: torch.device) -> tuple[to
     token_logits, language_logits = model.logits_with_language(inputs, audio_features)
     asr_loss = F.cross_entropy(token_logits.transpose(1, 2), asr_targets, ignore_index=IGNORE_INDEX)
     valid_lid = lid_targets.ne(IGNORE_INDEX)
-    lid_count = int(valid_lid.sum().item())
-    if lid_count:
+    lid_count = int(valid_lid.sum().item()) if lid_loss_weight else 0
+    if lid_loss_weight and lid_count:
         lid_loss = F.cross_entropy(language_logits.transpose(1, 2), lid_targets, ignore_index=IGNORE_INDEX)
         correct = int((language_logits.argmax(dim=-1)[valid_lid] == lid_targets[valid_lid]).sum().item())
     else:
         lid_loss = torch.zeros((), device=device)
         correct = 0
-    return asr_loss, lid_loss, asr_loss + LID_LOSS_WEIGHT * lid_loss, correct, lid_count
+    return asr_loss, lid_loss, asr_loss + lid_loss_weight * lid_loss, correct, lid_count
 
 
 @torch.no_grad()
-def per_example_loss_values(model, batch: dict[str, Any], device: torch.device) -> list[dict[str, float]]:
+def per_example_loss_values(
+    model, batch: dict[str, Any], device: torch.device, lid_loss_weight: float
+) -> list[dict[str, float]]:
     """Calculate the three training objectives independently for every clip in a batch."""
     mels = batch["mels"].to(device)
     inputs = batch["inputs"].to(device)
@@ -237,31 +253,33 @@ def per_example_loss_values(model, batch: dict[str, Any], device: torch.device) 
         return (losses * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
 
     token_losses = mean_per_clip(token_logits, asr_targets)
-    language_losses = mean_per_clip(language_logits, lid_targets)
+    language_losses = mean_per_clip(language_logits, lid_targets) if lid_loss_weight else torch.zeros_like(token_losses)
     values = []
     for token_loss, language_loss in zip(token_losses.tolist(), language_losses.tolist()):
         values.append({
             "token_loss": token_loss,
             "language_id_loss": language_loss,
-            "loss": token_loss + LID_LOSS_WEIGHT * language_loss,
+            "loss": token_loss + lid_loss_weight * language_loss,
         })
     return values
 
 
 @torch.no_grad()
-def evaluate(model, loader: DataLoader, dataset: MiamiDataset, device: torch.device) -> tuple[dict[str, float], list[dict[str, str]]]:
+def evaluate(
+    model, loader: DataLoader, dataset: MiamiDataset, device: torch.device, lid_loss_weight: float
+) -> tuple[dict[str, float], list[dict[str, str]]]:
     model.eval()
     total_asr_loss = total_lid_loss = 0.0
     batches = correct_lid = total_lid = 0
     losses_by_audio_path: dict[str, dict[str, float]] = {}
     for batch in tqdm(loader, desc="Held-out loss", leave=False):
-        asr_loss, lid_loss, _, correct, count = model_losses(model, batch, device)
+        asr_loss, lid_loss, _, correct, count = model_losses(model, batch, device, lid_loss_weight)
         total_asr_loss += float(asr_loss)
         total_lid_loss += float(lid_loss)
         batches += 1
         correct_lid += correct
         total_lid += count
-        for row, values in zip(batch["rows"], per_example_loss_values(model, batch, device)):
+        for row, values in zip(batch["rows"], per_example_loss_values(model, batch, device, lid_loss_weight)):
             losses_by_audio_path[row["audio_path"]] = values
 
     substitutions = deletions = insertions = reference_words = 0
@@ -289,7 +307,7 @@ def evaluate(model, loader: DataLoader, dataset: MiamiDataset, device: torch.dev
     token_loss = total_asr_loss / max(batches, 1)
     language_id_loss = total_lid_loss / max(batches, 1)
     return {
-        "eval/loss": token_loss + LID_LOSS_WEIGHT * language_id_loss,
+        "eval/loss": token_loss + lid_loss_weight * language_id_loss,
         "eval/token_loss": token_loss,
         "eval/language_id_loss": language_id_loss,
         "eval/lid_accuracy": correct_lid / total_lid if total_lid else float("nan"),
@@ -419,9 +437,21 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, default=Path("processed/train.csv"))
     parser.add_argument("--output-dir", type=Path, default=Path("processed/05_train"))
     parser.add_argument("--base-model", default="small")
+    parser.add_argument(
+        "--method",
+        choices=("lora", "full"),
+        default="lora",
+        help="Fine-tuning backend: PEFT LoRA adapters, or all Whisper plus language-head weights.",
+    )
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
+    parser.add_argument(
+        "--lid-loss-weight",
+        type=float,
+        default=DEFAULT_LID_LOSS_WEIGHT,
+        help="Weight for token-level language-ID loss; set to 0 to train ASR tokens only.",
+    )
     parser.add_argument("--download-root", type=Path, default=Path("models/whisper"))
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=4)
@@ -455,6 +485,8 @@ def main() -> None:
         parser.error("--max-samples must be at least 2 so both train and test partitions are non-empty")
     if args.max_train_steps is not None and args.max_train_steps < 1:
         parser.error("--max-train-steps must be positive")
+    if args.lid_loss_weight < 0:
+        parser.error("--lid-loss-weight cannot be negative")
     if not 0 < TRAIN_FRACTION < 1:
         raise RuntimeError("TRAIN_FRACTION must be between zero and one")
 
@@ -478,14 +510,20 @@ def main() -> None:
     write_manifest(args.output_dir / "train_split.csv", train_rows)
     write_manifest(args.output_dir / "test_split.csv", test_rows)
 
-    model = load_token_lid_lora_model(
+    finetune = make_finetune_method(
+        args.method,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+    )
+    model = finetune.load_model(
         args.base_model,
-        rank=args.lora_rank,
-        alpha=args.lora_alpha,
-        dropout=args.lora_dropout,
         device=device,
         download_root=str(args.download_root),
     )
+    if args.lid_loss_weight == 0:
+        frozen_parameters = freeze_language_head(model)
+        print(f"Language-ID objective disabled; froze {frozen_parameters:,} language-head parameters.")
     tokenizer = get_tokenizer(model.is_multilingual, num_languages=model.num_languages, language="en", task="transcribe")
     train_dataset = MiamiDataset(train_rows, tokenizer, model.dims.n_mels)
     eval_dataset = MiamiDataset(eval_rows, tokenizer, model.dims.n_mels)
@@ -508,7 +546,7 @@ def main() -> None:
             "test_clips": len(test_rows),
             "held_out_eval_clips": len(eval_dataset),
             "language_labels": model.language_labels,
-            "lid_loss_weight": LID_LOSS_WEIGHT,
+            "lid_loss_weight": args.lid_loss_weight,
         },
     )
     global_step = 0
@@ -520,13 +558,13 @@ def main() -> None:
 
     def run_evaluation(step: int) -> dict[str, float]:
         nonlocal best_eval_loss, best_eval_rows
-        metrics, evaluation_rows = evaluate(model, eval_loader, eval_dataset, device)
+        metrics, evaluation_rows = evaluate(model, eval_loader, eval_dataset, device, args.lid_loss_weight)
         write_evaluation_csv(args.output_dir / "eval_predictions.csv", evaluation_rows)
         metrics["eval/best_loss"] = min(best_eval_loss, metrics["eval/loss"])
         if metrics["eval/loss"] < best_eval_loss:
             best_eval_loss = metrics["eval/loss"]
             best_eval_rows = evaluation_rows
-            save_token_lid_lora_adapter(model, args.output_dir / "best_lora")
+            finetune.save_named(model, args.output_dir, "best")
             best_csv_path = args.output_dir / "best_eval_predictions.csv"
             write_evaluation_csv(best_csv_path, best_eval_rows)
             upsert_run_results(
@@ -538,10 +576,12 @@ def main() -> None:
             )
         metrics["eval/best_loss"] = best_eval_loss
         wandb.log(metrics, step=step)
-        print(
-            f"step {step}: loss={metrics['eval/loss']:.4f}, WER={metrics['eval/wer']:.3%}, "
-            f"LID accuracy={metrics['eval/lid_accuracy']:.3%}, best loss={best_eval_loss:.4f}"
+        lid_message = (
+            f"LID accuracy={metrics['eval/lid_accuracy']:.3%}"
+            if args.lid_loss_weight
+            else "LID objective disabled"
         )
+        print(f"step {step}: loss={metrics['eval/loss']:.4f}, WER={metrics['eval/wer']:.3%}, {lid_message}, best loss={best_eval_loss:.4f}")
         model.train()
         return metrics
 
@@ -553,7 +593,9 @@ def main() -> None:
                 optimizer.zero_grad(set_to_none=True)
                 autocast = torch.autocast(device_type="cuda", dtype=torch.float16) if device.type == "cuda" else contextlib.nullcontext()
                 with autocast:
-                    asr_loss, lid_loss, loss, correct, lid_count = model_losses(model, batch, device)
+                    asr_loss, lid_loss, loss, correct, lid_count = model_losses(
+                        model, batch, device, args.lid_loss_weight
+                    )
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -576,7 +618,7 @@ def main() -> None:
                 if args.max_train_steps is not None and global_step >= args.max_train_steps:
                     reached_step_limit = True
                     break
-            save_token_lid_lora_adapter(model, args.output_dir / "last_lora")
+            finetune.save_named(model, args.output_dir, "last")
             if reached_step_limit:
                 break
 
@@ -584,13 +626,13 @@ def main() -> None:
             run_evaluation(global_step)
         if not best_eval_rows:
             raise RuntimeError("No held-out evaluation rows were produced")
-        save_token_lid_lora_adapter(model, args.output_dir / "final_lora")
+        finetune.save_named(model, args.output_dir, "final")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_run_label = re.sub(r"[^A-Za-z0-9_-]+", "_", run_label)
         html_path = args.analysis_dir / f"{timestamp}_run_{safe_run_label}.html"
         write_evaluation_html(html_path, best_eval_rows, run_label, best_eval_loss)
         run.summary["best_eval_loss"] = best_eval_loss
-        run.summary["best_lora_adapter"] = str(args.output_dir / "best_lora")
+        run.summary[finetune.wandb_best_key] = str(finetune.checkpoint_path(args.output_dir, "best"))
         run.summary["evaluation_csv"] = str(args.output_dir / "best_eval_predictions.csv")
         run.summary["evaluation_html"] = str(html_path)
         print(f"Wrote best held-out evaluation review to {html_path}")

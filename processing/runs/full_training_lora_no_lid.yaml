@@ -1,0 +1,18 @@
+# ASR-only LoRA ablation. This keeps the full LoRA configuration unchanged,
+# but freezes the language-ID head and optimizes token cross-entropy alone.
+run_name: full_training_lora_no_lid
+
+train:
+  manifest: processed/train.csv
+  output_dir: processed/training_runs/full_training_lora_no_lid
+  base_model: small
+  method: lora
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lid_loss_weight: 0.0
+  epochs: 3
+  batch_size: 2
+  eval_every_steps: 500
+  wandb_project: miami-whisper-token-lid
+  wandb_mode: online

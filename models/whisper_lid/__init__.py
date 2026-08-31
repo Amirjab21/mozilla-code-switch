@@ -1,6 +1,7 @@
 """A local Whisper fork with a parallel token-level language-ID head."""
 
 from .decode import TokenLanguageDecodingResult, decode_with_token_language
+from .finetune import FineTuneMethod, FullFineTune, LoraFineTune, make_finetune_method
 from .model import (
     DEFAULT_LANGUAGE_LABELS,
     WhisperTokenLID,
@@ -16,12 +17,16 @@ from .model_lora import (
 
 __all__ = [
     "DEFAULT_LANGUAGE_LABELS",
+    "FineTuneMethod",
+    "FullFineTune",
+    "LoraFineTune",
     "TokenLanguageDecodingResult",
     "WhisperTokenLID",
     "decode_with_token_language",
     "encoder_decoder_linear_targets",
     "load_token_lid_checkpoint",
     "load_token_lid_lora_model",
+    "make_finetune_method",
     "save_token_lid_lora_adapter",
     "load_token_lid_model",
     "save_token_lid_checkpoint",

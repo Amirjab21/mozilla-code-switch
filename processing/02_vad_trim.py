@@ -42,7 +42,8 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path("processed/02_vad"))
     parser.add_argument("--output-manifest", type=Path, default=Path("processed/02_vad.csv"))
     parser.add_argument("--threshold", type=float, default=0.5)
-    parser.add_argument("--merge-gap-ms", type=int, default=20)
+    parser.add_argument("--merge-gap-ms", type=int, default=2000,
+                        help="Keep pauses up to this duration within a clip (default: 2000 ms).")
     parser.add_argument("--ffmpeg", default="ffmpeg")
     args = parser.parse_args()
 
