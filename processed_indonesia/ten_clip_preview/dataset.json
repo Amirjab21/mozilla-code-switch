@@ -1,0 +1,9 @@
+{
+  "title": "Indonesian processing output \u2014 ten_clip_preview",
+  "paths": {
+    "vad_manifest": "02_vad.csv",
+    "review_audio_dir": "01_segments/",
+    "vad_audio_dir": "02_vad/",
+    "whisper_evaluation": "04_whisper_evaluation.csv"
+  }
+}

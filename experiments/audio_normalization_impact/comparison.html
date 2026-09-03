@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Audio normalization impact</title>
+  <style>
+    :root { --ink:#10232e; --muted:#64737c; --paper:#f7f5ef; --panel:#fff; --line:#d8e0e2; --navy:#123d52; --aqua:#0b7778; --accent:#d85a38; --good:#dff3df; --bad:#fde3e1; }
+    * { box-sizing:border-box; } body { margin:0; background:var(--paper); color:var(--ink); font:15px/1.45 system-ui,sans-serif; }
+    header { background:var(--navy); color:#fff; padding:2.6rem 1.25rem 2rem; } .wrap { width:min(1280px,calc(100% - 2rem)); margin:auto; }
+    h1 { margin:0; font-size:clamp(2rem,5vw,3rem); letter-spacing:-.04em; } header p { margin:.7rem 0 0; color:#d6e6e8; max-width:760px; }
+    main { padding:1.5rem 0 4rem; } .controls { display:flex; gap:.8rem; flex-wrap:wrap; margin-bottom:1rem; }
+    label { display:grid; gap:.25rem; color:var(--muted); font-size:.75rem; font-weight:700; letter-spacing:.04em; text-transform:uppercase; }
+    input,select { padding:.7rem .8rem; border:1px solid var(--line); border-radius:.45rem; font:inherit; background:#fff; text-transform:none; letter-spacing:normal; }
+    .summary { display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-bottom:1rem; }
+    .summary-card { background:var(--panel); border:1px solid var(--line); border-radius:.7rem; padding:1rem; }
+    .summary-card h2 { margin:0 0 .5rem; font-size:1rem; } .summary-card strong { font-size:1.5rem; display:block; }
+    .summary-card table { width:100%; border-collapse:collapse; margin-top:.5rem; font-size:.9rem; }
+    .summary-card th,.summary-card td { padding:.35rem 0; text-align:left; border-bottom:1px solid #edf0f1; }
+    .layout { display:grid; grid-template-columns:310px minmax(0,1fr); gap:1rem; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:.7rem; overflow:hidden; }
+    .records { max-height:70vh; overflow:auto; }
+    .record { display:block; width:100%; padding:.8rem 1rem; border:0; border-bottom:1px solid #edf0f1; background:#fff; color:inherit; text-align:left; cursor:pointer; }
+    .record[aria-current=true] { background:#e6f3f2; }
+    .muted { color:var(--muted); } .detail { padding:1.25rem; }
+    .reference { padding:.8rem; border-radius:.45rem; background:#f2f5f5; margin:1rem 0; }
+    .models { display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-top:1rem; }
+    .model { border:1px solid var(--line); border-radius:.55rem; padding:1rem; }
+    h2,h3 { margin:0; } h2 { font-size:1.2rem; } h3 { font-size:1rem; }
+    audio { width:100%; margin:.55rem 0; }
+    canvas { width:100%; height:120px; display:block; background:#f4f7f6; border:1px solid var(--line); border-radius:.35rem; cursor:crosshair; }
+    .wave-note { margin:.25rem 0 0; color:var(--muted); font-size:.76rem; }
+    .wer { margin:.35rem 0 .75rem; color:var(--muted); } .transcript { min-height:3.5rem; margin:0; }
+    .alignment { margin-top:.75rem; line-height:2.1; }
+    .token { display:inline-block; margin:2px; padding:2px 5px; border-radius:3px; }
+    .ok { background:var(--good); color:#17602b; } .bad { background:var(--bad); color:#8b251c; } .insert { border:1px dashed #b94a3b; }
+    .empty { padding:2rem; color:var(--muted); text-align:center; }
+    @media (max-width:900px) { .layout,.models,.summary { grid-template-columns:1fr; } .records { max-height:250px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>Audio normalization impact</h1>
+      <p>Side-by-side Wav2Vec2 results on 300 Indonesian development clips: VAD-approved audio with and without EBU R128 loudness normalization.</p>
+    </div>
+  </header>
+  <main class="wrap">
+    <div class="controls">
+      <label>Search <input id="search" type="search" placeholder="Filename or transcript"></label>
+      <label>Sort
+        <select id="sort">
+          <option value="difference">Largest WER difference</option>
+          <option value="normalized">Worst normalized WER</option>
+          <option value="unnormalized">Worst unnormalized WER</option>
+        </select>
+      </label>
+    </div>
+    <section class="summary">
+      <article class="summary-card"><h2>Unnormalized (02 VAD)</h2><strong id="summaryUnnormalized">—</strong><table id="statsUnnormalized"></table></article>
+      <article class="summary-card"><h2>Normalized (03 loudnorm)</h2><strong id="summaryNormalized">—</strong><table id="statsNormalized"></table></article>
+    </section>
+    <div class="layout">
+      <aside class="panel"><div id="records" class="records"><p class="empty">Loading results…</p></div></aside>
+      <section id="detail" class="panel detail"><p class="empty">Loading results…</p></section>
+    </div>
+  </main>
+  <script>
+    const query = new URLSearchParams(location.search);
+    const configUrl = new URL(query.get('config') || '../../processed_indonesia/audio_normalization_impact/dataset.json', location.href);
+    const $ = selector => document.querySelector(selector);
+    const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+    const json = value => { try { return JSON.parse(value || '[]'); } catch { return []; } };
+    const parseCsv = text => { const output=[]; let row=[], field='', quoted=false; for(let i=0;i<text.length;i++){ const char=text[i], next=text[i+1]; if(char==='"'&&quoted&&next==='"'){field+='"';i++;}else if(char==='"'){quoted=!quoted;}else if(char===','&&!quoted){row.push(field);field='';}else if((char==='\n'||char==='\r')&&!quoted){if(char==='\r'&&next==='\n')i++;row.push(field);if(row.some(Boolean))output.push(row);row=[];field='';}else field+=char;}if(field||row.length){row.push(field);output.push(row);}const [headers,...values]=output;return values.map(value=>Object.fromEntries(headers.map((header,index)=>[header,value[index]??'']))); };
+    const clip = row => row.audio_path.split('/').pop();
+    const alignment = items => items.map(item => item.operation==='correct' ? `<span class="token ok">${escape(item.reference)}</span>` : `<span class="token bad ${item.operation==='insertion'?'insert':''}">${item.operation==='insertion'?`+ ${escape(item.hypothesis)}`:item.operation==='deletion'?`− ${escape(item.reference)}`:`${escape(item.reference)} → ${escape(item.hypothesis)}`}</span>`).join('');
+    function aggregateStats(items) {
+      const out = { reference_words:0, substitutions:0, deletions:0, insertions:0 };
+      for (const row of items) {
+        const groups = json(row.wer_by_langid, {});
+        for (const values of Object.values(groups)) {
+          for (const key of ['reference_words','substitutions','deletions','insertions']) out[key] += Number(values[key] || 0);
+        }
+      }
+      out.wer = (out.substitutions + out.deletions + out.insertions) / (out.reference_words || 1);
+      return out;
+    }
+    function renderSummary(normalized, unnormalized) {
+      const set = (summaryId, tableId, items) => {
+        const stats = aggregateStats(items);
+        $(summaryId).textContent = `${items.length} clips · aggregate WER ${(stats.wer * 100).toFixed(2)}%`;
+        $(tableId).innerHTML = [
+          ['Reference words', stats.reference_words],
+          ['Substitutions', stats.substitutions],
+          ['Deletions', stats.deletions],
+          ['Insertions', stats.insertions],
+          ['Mean clip WER', `${(100 * items.reduce((sum, row) => sum + Number(row.wer), 0) / (items.length || 1)).toFixed(2)}%`],
+        ].map(([label, value]) => `<tr><th>${label}</th><td>${value}</td></tr>`).join('');
+      };
+      set('#summaryUnnormalized', '#statsUnnormalized', unnormalized);
+      set('#summaryNormalized', '#statsNormalized', normalized);
+    }
+    let rows = [], active = null, audioDirs = {}, waveforms = {};
+    const visible = () => {
+      const term = $('#search').value.trim().toLowerCase();
+      const sort = $('#sort').value;
+      return rows.filter(row => `${clip(row.unnormalized)} ${row.unnormalized.transcript}`.toLowerCase().includes(term))
+        .sort((a, b) => {
+          const aUnnormalized = Number(a.unnormalized.wer), bUnnormalized = Number(b.unnormalized.wer);
+          const aNormalized = Number(a.normalized.wer), bNormalized = Number(b.normalized.wer);
+          if (sort === 'unnormalized') return bUnnormalized - aUnnormalized;
+          if (sort === 'normalized') return bNormalized - aNormalized;
+          return Math.abs(bNormalized - bUnnormalized) - Math.abs(aNormalized - aUnnormalized);
+        });
+    };
+    function mediaCard(id, title, src) {
+      return `<article class="model"><h3>${title}</h3><audio id="${id}" controls preload="metadata" src="${escape(src)}"></audio><canvas id="${id}-wave" aria-label="${title} waveform; click to seek"></canvas><p class="wave-note">Click waveform to seek.</p><p class="wer">WER: <span id="${id}-wer">—</span></p><p class="transcript" id="${id}-transcript"></p><div class="alignment" id="${id}-alignment"></div></article>`;
+    }
+    function drawCanvas(canvas) {
+      if (!canvas._waveform?.length) return;
+      const rect = canvas.getBoundingClientRect(), ratio = devicePixelRatio || 1;
+      const width = Math.max(1, Math.round(rect.width * ratio)), height = Math.max(1, Math.round(rect.height * ratio));
+      canvas.width = width; canvas.height = height;
+      const ctx = canvas.getContext('2d'), data = canvas._waveform;
+      ctx.fillStyle = '#f4f7f6'; ctx.fillRect(0, 0, width, height);
+      ctx.strokeStyle = '#0b7778'; ctx.lineWidth = ratio; ctx.beginPath();
+      for (let x = 0; x < width; x++) {
+        const [min, max] = data[Math.min(data.length - 1, Math.floor(x * data.length / width))];
+        ctx.moveTo(x, (1 + min) * height / 2); ctx.lineTo(x, (1 + max) * height / 2);
+      }
+      ctx.stroke();
+    }
+    function drawPlayhead(canvas, player) {
+      if (!canvas?._waveform?.length || !Number.isFinite(player.duration)) return;
+      drawCanvas(canvas);
+      const ctx = canvas.getContext('2d'), x = (player.currentTime / player.duration) * canvas.width;
+      ctx.strokeStyle = '#d85a38'; ctx.lineWidth = 2 * (devicePixelRatio || 1);
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
+    }
+    function attachMedia(id, row, waveform) {
+      const player = document.querySelector(`#${id}`);
+      const canvas = document.querySelector(`#${id}-wave`);
+      canvas._waveform = waveform;
+      document.querySelector(`#${id}-wer`).textContent = `${(100 * Number(row.wer)).toFixed(2)}%`;
+      document.querySelector(`#${id}-transcript`).textContent = row.asr_transcript;
+      document.querySelector(`#${id}-alignment`).innerHTML = alignment(json(row.alignment));
+      drawCanvas(canvas);
+      player.addEventListener('timeupdate', () => drawPlayhead(canvas, player));
+      canvas.addEventListener('click', event => {
+        const rect = canvas.getBoundingClientRect();
+        if (Number.isFinite(player.duration)) player.currentTime = ((event.clientX - rect.left) / rect.width) * player.duration;
+      });
+    }
+    function renderList() {
+      const items = visible();
+      if (!items.includes(active)) active = items[0] || null;
+      $('#records').innerHTML = items.length
+        ? items.map(item => `<button class="record" data-id="${rows.indexOf(item)}" aria-current="${item === active}"><strong>${escape(clip(item.unnormalized))}</strong><br><span class="muted">Unnorm ${(100 * Number(item.unnormalized.wer)).toFixed(1)}% · Norm ${(100 * Number(item.normalized.wer)).toFixed(1)}%</span></button>`).join('')
+        : '<p class="empty">No matching clips.</p>';
+      renderDetail();
+    }
+    function renderDetail() {
+      if (!active) { $('#detail').innerHTML = '<p class="empty">Choose a clip to inspect it.</p>'; return; }
+      const name = clip(active.unnormalized);
+      const unnormSrc = new URL(name, audioDirs.unnormalized).href;
+      const normSrc = new URL(name, audioDirs.normalized).href;
+      $('#detail').innerHTML = `<h2>${escape(name)}</h2><div class="reference"><strong>Ground truth</strong><br>${escape(active.unnormalized.transcript)}</div><div class="models">${mediaCard('unnormalizedAudio', 'Unnormalized — VAD-approved copy', unnormSrc)}${mediaCard('normalizedAudio', 'Normalized — loudnorm -23 LUFS', normSrc)}</div>`;
+      attachMedia('unnormalizedAudio', active.unnormalized, waveforms[name]?.unnormalized || []);
+      attachMedia('normalizedAudio', active.normalized, waveforms[name]?.normalized || []);
+    }
+    $('#records').addEventListener('click', event => {
+      const button = event.target.closest('.record');
+      if (button) { active = rows[Number(button.dataset.id)]; renderList(); }
+    });
+    $('#search').addEventListener('input', renderList);
+    $('#sort').addEventListener('change', renderList);
+    window.addEventListener('resize', () => document.querySelectorAll('canvas').forEach(canvas => drawCanvas(canvas)));
+    fetch(configUrl).then(response => { if (!response.ok) throw Error('Could not load dataset.json'); return response.json(); })
+      .then(config => {
+        const paths = config.paths;
+        audioDirs = {
+          unnormalized: new URL(paths.vad_audio_dir.replace(/\/?$/, '/'), configUrl).href,
+          normalized: new URL(paths.normalized_audio_dir.replace(/\/?$/, '/'), configUrl).href,
+        };
+        const unnormUrl = new URL(query.get('unnormalized_csv') || paths.wav2vec2_unnormalized, configUrl);
+        const normUrl = new URL(query.get('normalized_csv') || paths.wav2vec2_normalized, configUrl);
+        const waveformsUrl = new URL(paths.waveforms, configUrl);
+        return Promise.all([fetch(unnormUrl), fetch(normUrl), fetch(waveformsUrl)]);
+      })
+      .then(async responses => {
+        if (responses.some(response => !response.ok)) throw Error('Run experiments/audio_normalization_impact/run_experiment.py to produce evaluation CSVs.');
+        const [unnormalizedText, normalizedText, waveformText] = await Promise.all(responses.map(response => response.text()));
+        waveforms = JSON.parse(waveformText);
+        const normalizedByClip = new Map(parseCsv(normalizedText).map(row => [clip(row), row]));
+        rows = parseCsv(unnormalizedText)
+          .map(row => ({ unnormalized: row, normalized: normalizedByClip.get(clip(row)) }))
+          .filter(row => row.normalized);
+        renderSummary(rows.map(row => row.normalized), rows.map(row => row.unnormalized));
+        renderList();
+      })
+      .catch(error => {
+        $('#records').innerHTML = '';
+        $('#detail').innerHTML = `<p class="empty">${escape(error.message)}</p>`;
+      });
+  </script>
+</body>
+</html>

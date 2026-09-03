@@ -54,7 +54,7 @@
       <button id="previous">← Previous</button><input id="position" type="range" min="0" value="0"><button id="next">Next →</button>
     </section>
     <section class="controls" hidden id="transcriptionControls">
-      <label>Hugging Face Whisper <select id="whisperModel"><option value="small" selected>Small</option><option value="medium">Medium</option></select></label>
+      <label>OpenAI Whisper <select id="whisperModel"><option value="small" selected>Small</option><option value="medium">Medium</option></select></label>
       <button id="transcribe">Whisper transcription</button><span id="transcriptionStatus" class="muted"></span>
     </section>
     <section id="viewer" class="card" hidden>
@@ -62,7 +62,7 @@
       <audio id="audio" controls preload="metadata"></audio>
       <span class="label">Clip metrics</span><div id="metrics" class="text"></div>
       <span class="label">Predicted transcript</span><div id="prediction" class="text"></div>
-      <span class="label">On-demand Hugging Face Whisper transcript</span><div id="onDemandTranscript" class="text muted">Select a model and choose “Whisper transcription”.</div>
+      <span class="label">On-demand OpenAI Whisper transcript</span><div id="onDemandTranscript" class="text muted">Select a model and choose “Whisper transcription”.</div>
       <span class="label">Ground-truth language labels</span><div id="referenceLabels" class="tokens"></div>
       <span class="label">Language labels</span>
       <div id="languageVisualisation" class="language-visualisation"></div>
@@ -268,7 +268,7 @@
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || `${response.status} ${response.statusText}`);
         $('onDemandTranscript').textContent = result.transcript;
-        status.textContent = `Completed with Hugging Face Whisper ${result.model}.`;
+        status.textContent = `Completed with OpenAI Whisper ${result.model}.`;
       } catch (error) {
         status.className = 'error';
         status.textContent = `Transcription failed: ${error.message}. Start processing/06_huggingface_whisper_server.py instead of python -m http.server.`;

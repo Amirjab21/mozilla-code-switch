@@ -4,9 +4,11 @@ version = "0.1.0"
 description = "Prepare timestamp-aligned Bangor Miami corpus clips for speech-model training."
 requires-python = ">=3.10,<3.14"
 dependencies = [
+  "librosa>=0.10",
   "numpy>=1.26",
   "openai-whisper",
   "peft>=0.14",
+  "pyctcdecode>=0.5.0",
   "python-dotenv>=1.0",
   "pyyaml>=6.0",
   "silero-vad>=5.1.2",

@@ -36,6 +36,7 @@ from models.whisper_lid import load_token_lid_lora_model, save_token_lid_lora_ad
 from models.whisper_lid.decode import decode_with_token_language
 from models.whisper_lid.labels import IGNORE_INDEX, make_token_language_targets
 from run_config import apply_defaults, load_section
+from wer_metrics import normalise_for_wer, word_error_rate
 
 
 # Training defaults. Command-line arguments may override these for an individual run.
@@ -54,33 +55,6 @@ def select_device(value: str) -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
-
-
-def normalise_for_wer(text: str) -> list[str]:
-    return re.sub(r"[^\w\s]", "", text.casefold()).split()
-
-
-def word_error_rate(reference: str, hypothesis: str) -> tuple[int, int, int, int]:
-    """Return substitutions, deletions, insertions, and reference word count."""
-    ref, hyp = normalise_for_wer(reference), normalise_for_wer(hypothesis)
-    table = [[(0, 0, 0)] * (len(hyp) + 1) for _ in range(len(ref) + 1)]
-    for i in range(1, len(ref) + 1):
-        table[i][0] = (0, i, 0)
-    for j in range(1, len(hyp) + 1):
-        table[0][j] = (0, 0, j)
-    for i in range(1, len(ref) + 1):
-        for j in range(1, len(hyp) + 1):
-            if ref[i - 1] == hyp[j - 1]:
-                table[i][j] = table[i - 1][j - 1]
-                continue
-            candidates = [
-                tuple(table[i - 1][j - 1][k] + (1 if k == 0 else 0) for k in range(3)),
-                tuple(table[i - 1][j][k] + (1 if k == 1 else 0) for k in range(3)),
-                tuple(table[i][j - 1][k] + (1 if k == 2 else 0) for k in range(3)),
-            ]
-            table[i][j] = min(candidates, key=sum)
-    substitutions, deletions, insertions = table[-1][-1]
-    return substitutions, deletions, insertions, len(ref)
 
 
 def read_rows(manifest: Path) -> list[dict[str, str]]:
@@ -105,6 +79,35 @@ def read_rows(manifest: Path) -> list[dict[str, str]]:
         if not labels:
             raise ValueError(f"No word_langids for {row['audio_path']}")
     return rows
+
+
+def filter_jember_001_first_ten(
+    rows: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Select nested Jember-001 windows ending at TSV rows 1 through 10."""
+    pattern = re.compile(r"^jember_001_0001-(\d{4})$")
+    selected: list[tuple[int, dict[str, str]]] = []
+    for row in rows:
+        match = pattern.fullmatch(Path(row.get("audio_path", "")).stem)
+        if match and 1 <= int(match.group(1)) <= 10:
+            selected.append((int(match.group(1)), row))
+    selected.sort(key=lambda item: item[0])
+    if len(selected) != 10:
+        found = [Path(row["audio_path"]).stem for _, row in selected]
+        raise ValueError(
+            "Expected all 10 Jember-001 preview windows ending at rows 1–10; "
+            f"found {len(selected)}: {found}"
+        )
+    return [row for _, row in selected]
+
+
+def split_preview_rows(
+    rows: list[dict[str, str]], test_size: int = 2,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Use the final windows as a stable holdout for the diagnostic run."""
+    if not 0 < test_size < len(rows):
+        raise ValueError("Preview test size must leave non-empty train and test sets")
+    return rows[:-test_size], rows[-test_size:]
 
 
 def recording_key(row: dict[str, str]) -> str:
@@ -249,7 +252,13 @@ def per_example_loss_values(model, batch: dict[str, Any], device: torch.device) 
 
 
 @torch.no_grad()
-def evaluate(model, loader: DataLoader, dataset: MiamiDataset, device: torch.device) -> tuple[dict[str, float], list[dict[str, str]]]:
+def evaluate(
+    model,
+    loader: DataLoader,
+    dataset: MiamiDataset,
+    device: torch.device,
+    language: str | None = None,
+) -> tuple[dict[str, float], list[dict[str, str]]]:
     model.eval()
     total_asr_loss = total_lid_loss = 0.0
     batches = correct_lid = total_lid = 0
@@ -267,7 +276,7 @@ def evaluate(model, loader: DataLoader, dataset: MiamiDataset, device: torch.dev
     substitutions = deletions = insertions = reference_words = 0
     predictions: list[dict[str, str]] = []
     for item in tqdm(dataset, desc="Held-out WER", leave=False):
-        result = decode_with_token_language(model, item["mel"], language=None)
+        result = decode_with_token_language(model, item["mel"], language=language)
         row = item["row"]
         s, d, i, words = word_error_rate(row["transcript"], result.text)
         substitutions += s
@@ -416,9 +425,20 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, help="YAML named-run configuration file.")
-    parser.add_argument("--manifest", type=Path, default=Path("processed/train.csv"))
-    parser.add_argument("--output-dir", type=Path, default=Path("processed/05_train"))
+    parser.add_argument("--manifest", type=Path, default=Path("processed_indonesia/train.csv"))
+    parser.add_argument("--output-dir", type=Path, default=Path("processed_indonesia/05_train"))
     parser.add_argument("--base-model", default="small")
+    parser.add_argument(
+        "--language", default="en",
+        help="Whisper language code used in the training prompt (use 'id' for Indonesian).",
+    )
+    parser.add_argument(
+        "--jember-001-first-ten", action="store_true",
+        help=(
+            "Restrict the run to jember_001_0001-0001 through "
+            "jember_001_0001-0010 and use a deterministic 8/2 diagnostic split."
+        ),
+    )
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
@@ -438,11 +458,11 @@ def main() -> None:
     parser.add_argument("--wandb-run-name")
     parser.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="online")
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
-    parser.add_argument("--analysis-dir", type=Path, default=Path("analysis/training_run_eval"))
+    parser.add_argument("--analysis-dir", type=Path, default=Path("analysis_indonesia/training_run_eval"))
     parser.add_argument(
         "--run-results-csv",
         type=Path,
-        default=Path("analysis/training_run_results.csv"),
+        default=Path("analysis_indonesia/training_run_results.csv"),
         help="Run-level aggregate evaluation table, updated when this run improves.",
     )
     apply_defaults(parser, config_values, config_args.config)
@@ -466,11 +486,17 @@ def main() -> None:
     torch.manual_seed(args.seed)
     device = select_device(args.device)
     rows = read_rows(args.manifest)
-    if args.max_samples is not None:
+    if args.jember_001_first_ten:
+        rows = filter_jember_001_first_ten(rows)
+        train_rows, test_rows = split_preview_rows(rows)
+        split_unit = "diagnostic Jember windows (first eight train, final two test)"
+    elif args.max_samples is not None:
         rng = random.Random(args.seed)
         rng.shuffle(rows)
         rows = rows[: args.max_samples]
-    train_rows, test_rows, split_unit = split_rows(rows, args.seed)
+        train_rows, test_rows, split_unit = split_rows(rows, args.seed)
+    else:
+        train_rows, test_rows, split_unit = split_rows(rows, args.seed)
     if not train_rows or not test_rows:
         raise RuntimeError("The split produced an empty train or test partition")
     eval_rows = test_rows[: min(args.eval_set_size, len(test_rows))]
@@ -486,7 +512,12 @@ def main() -> None:
         device=device,
         download_root=str(args.download_root),
     )
-    tokenizer = get_tokenizer(model.is_multilingual, num_languages=model.num_languages, language="en", task="transcribe")
+    tokenizer = get_tokenizer(
+        model.is_multilingual,
+        num_languages=model.num_languages,
+        language=args.language,
+        task="transcribe",
+    )
     train_dataset = MiamiDataset(train_rows, tokenizer, model.dims.n_mels)
     eval_dataset = MiamiDataset(eval_rows, tokenizer, model.dims.n_mels)
     collate = lambda items: collate_batch(items, tokenizer)
@@ -520,7 +551,9 @@ def main() -> None:
 
     def run_evaluation(step: int) -> dict[str, float]:
         nonlocal best_eval_loss, best_eval_rows
-        metrics, evaluation_rows = evaluate(model, eval_loader, eval_dataset, device)
+        metrics, evaluation_rows = evaluate(
+            model, eval_loader, eval_dataset, device, language=args.language
+        )
         write_evaluation_csv(args.output_dir / "eval_predictions.csv", evaluation_rows)
         metrics["eval/best_loss"] = min(best_eval_loss, metrics["eval/loss"])
         if metrics["eval/loss"] < best_eval_loss:

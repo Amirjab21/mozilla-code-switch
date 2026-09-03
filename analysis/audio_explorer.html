@@ -49,9 +49,9 @@
 <body>
   <header>
     <div class="wrap">
-      <p class="eyebrow">Bangor Miami Spanish–English Corpus</p>
-      <h1>Listen closely. Read in context.</h1>
-      <p>Choose a recording to play its source audio alongside the aligned CHAT transcript, speaker information, language tags, and English translations where available.</p>
+      <p class="eyebrow" id="eyebrow">Bangor Miami Spanish–English Corpus</p>
+      <h1 id="headline">Listen closely. Read in context.</h1>
+      <p id="intro">Choose a recording to play its source audio alongside the aligned CHAT transcript, speaker information, language tags, and English translations where available.</p>
     </div>
   </header>
   <main class="wrap">
@@ -80,12 +80,14 @@
     const query = new URLSearchParams(location.search);
     const configParameter = query.get('config') || '../dataset.json';
     const configUrl = new URL(configParameter, location.href);
-    let entries = [], dataset;
+    let entries = [], dataset, tabularRecords = [];
 
     const clean = value => value.replace(/\d+_\d+/g, '').replace(/\[[-+].*?\]/g, '').replace(/@s:[\w&+]+/g, '').replace(/\s+/g, ' ').trim();
     const clock = ms => { const total = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(total/60)}:${String(total%60).padStart(2,'0')}`; };
     const escape = value => value.replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[char]);
     const assetUrl = (directory, filename) => new URL(`${dataset.paths[directory].replace(/\/?$/, '/')}${filename}`, configUrl).href;
+    const sourceUrl = (source, filename) => new URL(`${source.audio_dir.replace(/\/?$/, '/')}${filename}`, configUrl).href;
+    const manifestUrl = source => new URL(source.manifest, configUrl).href;
 
     function parseChat(text) {
       const header = {}; entries = []; let current;
@@ -99,6 +101,17 @@
         } else if (current && line.startsWith('%eng:')) current.translation = clean(line.slice(5));
       }
       return header;
+    }
+    function parseTsv(text) {
+      const [headerLine, ...lines] = text.replace(/\r/g, '').split('\n').filter(Boolean);
+      const columns = headerLine.split('\t');
+      return lines.map(line => Object.fromEntries(columns.map((column, index) => [column, line.split('\t')[index] ?? ''])));
+    }
+    function timestampMs(value) {
+      if (!value) return null;
+      const parts = value.trim().split(':').map(Number);
+      if (parts.length !== 3 || parts.some(part => !Number.isFinite(part))) return null;
+      return ((parts[0] * 60 + parts[1]) * 60 + parts[2]) * 1000;
     }
     function showMetadata(header, name) {
       const fields = [['Participants',header.Participants],['Situation',header.Situation],['Date',header.Date],['Duration',header['Time Duration']],['Languages',header.Languages]];
@@ -115,6 +128,7 @@
       count.textContent = `${visible} of ${entries.length} utterances`;
     }
     async function load() {
+      if (dataset.format === 'tabular_audio') return loadTabular();
       const name = select.value;
       const nextQuery = new URLSearchParams(); if (query.has('config')) nextQuery.set('config', configParameter); nextQuery.set('recording', name);
       history.replaceState(null, '', `?${nextQuery}`);
@@ -124,6 +138,54 @@
       transcript.innerHTML = '<p class="loading">Loading transcript…</p>';
       try { const response = await fetch(assetUrl('chat_dir', `${name}.cha`)); if (!response.ok) throw new Error(response.status); const header = parseChat(await response.text()); showMetadata(header, name); render(); }
       catch (error) { transcript.innerHTML = '<p class="empty">The transcript could not be loaded. Check the dataset configuration and serve the files with a local web server.</p>'; count.textContent = ''; }
+    }
+    async function loadTabular() {
+      const record = tabularRecords.find(item => item.key === select.value);
+      if (!record) return;
+      const { source, audioId, rows } = record;
+      const nextQuery = new URLSearchParams();
+      if (query.has('config')) nextQuery.set('config', configParameter);
+      nextQuery.set('recording', record.key);
+      history.replaceState(null, '', `?${nextQuery}`);
+      const filename = audioId.includes('.') ? audioId : `${audioId}${source.audio_extension || ''}`;
+      audio.src = sourceUrl(source, filename); audio.load(); search.value = '';
+      document.querySelector('#chatLink').textContent = 'Open dataset TSV';
+      document.querySelector('#chatLink').href = manifestUrl(source);
+      document.querySelector('#tsvLink').hidden = true;
+      const first = rows[0];
+      entries = rows.map(row => ({
+        speaker: row.speaker ? `Speaker ${row.speaker}` : source.label,
+        text: row[source.transcript_column] || '',
+        start: timestampMs(row[source.start_column]),
+        end: timestampMs(row[source.end_column]),
+        translation: ''
+      }));
+      const fields = [['Dataset', source.label], ['Audio file', filename]];
+      (source.metadata_columns || []).forEach(column => fields.push([column.replace(/_/g, ' '), first[column]]));
+      metadata.innerHTML = fields.filter(([, value]) => value).map(([label, value]) => `<div><dt>${escape(label)}</dt><dd>${escape(value)}</dd></div>`).join('');
+      document.querySelector('#recordingTitle').textContent = filename;
+      render();
+    }
+    async function initialiseTabular() {
+      const loaded = await Promise.all(dataset.sources.map(async source => {
+        const response = await fetch(manifestUrl(source));
+        if (!response.ok) throw new Error(`Could not load ${source.manifest}`);
+        return { source, rows: parseTsv(await response.text()) };
+      }));
+      tabularRecords = loaded.flatMap(({ source, rows }) => {
+        const grouped = new Map();
+        rows.forEach(row => {
+          const audioId = row[source.audio_id_column];
+          if (!audioId) return;
+          if (!grouped.has(audioId)) grouped.set(audioId, []);
+          grouped.get(audioId).push(row);
+        });
+        return [...grouped].map(([audioId, groupedRows]) => ({ key: `${source.id}:${audioId}`, source, audioId, rows: groupedRows }));
+      });
+      tabularRecords.forEach(record => select.add(new Option(`${record.source.label} — ${record.audioId}`, record.key)));
+      select.value = query.get('recording') || tabularRecords[0]?.key || '';
+      if (!select.value) throw new Error('No audio entries were supplied in the dataset configuration.');
+      loadTabular();
     }
     audio.addEventListener('timeupdate', () => {
       const time = audio.currentTime * 1000; let active = null;
@@ -147,8 +209,15 @@
       if (row?.dataset.start !== undefined && row.dataset.start !== '') seekToUtterance(Number(row.dataset.start));
     });
     select.addEventListener('change', load); search.addEventListener('input', filter);
-    fetch(configUrl).then(response => { if (!response.ok) throw Error(response.status); return response.json(); }).then(config => {
+    fetch(configUrl).then(response => { if (!response.ok) throw Error(response.status); return response.json(); }).then(async config => {
       dataset = config; document.title = `${dataset.title || 'Corpus'} — Audio Explorer`;
+      if (dataset.format === 'tabular_audio') {
+        document.querySelector('#eyebrow').textContent = dataset.title || 'Speech dataset';
+        document.querySelector('#headline').textContent = 'Listen to every clip. Read every transcript.';
+        document.querySelector('#intro').textContent = 'Choose a recording or clip to play its source audio alongside the supplied transcript and available metadata.';
+        await initialiseTabular();
+        return;
+      }
       (dataset.recordings || []).forEach(name => select.add(new Option(name.replace(/(\D)(\d)/, '$1 $2'), name)));
       select.value = query.get('recording') || dataset.default_recording || dataset.recordings?.[0] || '';
       if (!select.value) throw Error('No recordings were supplied in the dataset configuration.');

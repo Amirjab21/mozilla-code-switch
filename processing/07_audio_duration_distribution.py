@@ -89,9 +89,9 @@ def write_svg(path: Path, durations: list[float], bin_count: int, title: str) ->
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, default=Path("processed/train.csv"))
+    parser.add_argument("--manifest", type=Path, default=Path("processed_indonesia/train.csv"))
     parser.add_argument("--audio-root", type=Path, default=Path("."), help="Base directory for relative audio_path values.")
-    parser.add_argument("--output", type=Path, default=Path("analysis/train_audio_duration_distribution.svg"))
+    parser.add_argument("--output", type=Path, default=Path("analysis_indonesia/train_audio_duration_distribution.svg"))
     parser.add_argument("--bins", type=int, default=40)
     args = parser.parse_args()
     if args.bins < 1:

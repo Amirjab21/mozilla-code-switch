@@ -1,5 +1,6 @@
 miami/
 miami/*
+indonesian_data/
 *.wav
 
 __pycache__

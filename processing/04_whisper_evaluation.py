@@ -6,14 +6,19 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
+
+from text_normalisation import normalize_text
 
 
 # Model-selection section: extend this registry when another inference backend is added.
 MODEL_BACKENDS = {"whisper": {"default_model": "medium", "description": "OpenAI Whisper multilingual ASR"}}
 CORPUS_TO_WHISPER_LANGUAGE = {"eng": "en", "spa": "es"}
+# Keep batch results reproducible.  Whisper's default fallback schedule samples
+# higher temperatures after a low-confidence decode, which can change output
+# between otherwise identical CPU requests.
+TRANSCRIBE_OPTIONS = {"task": "transcribe", "temperature": 0, "beam_size": 5}
 
 
 def choose_device(requested: str, torch) -> str:
@@ -27,15 +32,8 @@ def choose_device(requested: str, torch) -> str:
 
 
 def normalise_words(text: str) -> list[str]:
-    """Apply the same text rules used for the TSV-derived reference transcript."""
-    while "(" in text and ")" in text:
-        start, end = text.find("("), text.find(")", text.find("(") + 1)
-        if end < 0:
-            break
-        text = text[:start] + text[end + 1:]
-    text = text.replace("<", "").replace(">", "").replace("_", " ")
-    text = "".join(char for char in text if not unicodedata.category(char).startswith("P"))
-    return [word.casefold() for word in text.split() if word]
+    """Normalize a transcript with the shared scoring rules and tokenize it."""
+    return normalize_text(text).split()
 
 
 def reference_labels(row: dict[str, str], reference_words: list[str]) -> list[str]:
@@ -103,8 +101,8 @@ def dominant_reference(language_ids: list[str]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, default=Path("processed/02_vad.csv"))
-    parser.add_argument("--output-csv", type=Path, default=Path("processed/04_whisper_evaluation.csv"))
+    parser.add_argument("--manifest", type=Path, default=Path("processed_indonesia/02_vad.csv"))
+    parser.add_argument("--output-csv", type=Path, default=Path("processed_indonesia/04_whisper_evaluation.csv"))
     parser.add_argument("--backend", choices=MODEL_BACKENDS, default="whisper")
     parser.add_argument("--model", default="medium", help="Whisper model name; use a multilingual model such as medium.")
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or mps")
@@ -138,7 +136,7 @@ def main() -> None:
         mel = whisper.log_mel_spectrogram(audio, n_mels=model.dims.n_mels).to(device)
         _, probabilities = model.detect_language(mel)
         predicted_language, probability = max(probabilities.items(), key=lambda item: item[1])
-        result = model.transcribe(row["audio_path"], task="transcribe", fp16=device == "cuda", verbose=False)
+        result = model.transcribe(row["audio_path"], fp16=device == "cuda", verbose=False, **TRANSCRIBE_OPTIONS)
         hypothesis = normalise_words(result["text"])
         alignment, scores = align_words(reference, hypothesis, labels)
         output_rows.append({

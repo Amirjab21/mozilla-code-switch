@@ -1,0 +1,9 @@
+{
+  "title": "Indonesian/Javanese Wav2Vec2 — 300-clip evaluation",
+  "paths": {
+    "vad_manifest": "02_vad.csv",
+    "review_audio_dir": "02_vad/",
+    "vad_audio_dir": "02_vad/",
+    "whisper_evaluation": "04_wav2vec2_normalised.csv"
+  }
+}

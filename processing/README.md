@@ -1,6 +1,6 @@
-# Miami corpus processing pipeline
+# Indonesian and Javanese corpus processing pipeline
 
-Produces training-ready WAV clips and `train.csv` from the raw Miami corpus MP3 and CHAT files. The pipeline is deliberately split into three independently runnable stages so that a completed stage does not need to be repeated after a later failure.
+Produces 16 kHz WAV clips and a start-corrected transcript manifest from the Jember timestamped recordings and Indonesian development clips. All outputs are isolated in `processed_indonesia/`; generated analysis artifacts belong in `analysis_indonesia/`.
 
 Ensure `uv` and `ffmpeg` are installed, then create the project environment and run the complete pipeline:
 
@@ -9,14 +9,21 @@ uv sync --project processing
 uv run --project processing python processing/00_run_pipeline.py
 ```
 
+The command now runs only two stages: `01_prepare_indonesian_segments.py`, followed by `02_match_predicted_clip_start.py`. Jember transcript starts are matched using Wav2Vec2; Indonesian development transcripts pass through unchanged. It does not run VAD, audio normalization, training, or ASR evaluation, and it does not alter the Miami `processed/` directory.
+
+When stage 2 completes, the matcher prints the clip-start review URL. The main outputs are:
+
+- `processed_indonesia/01_segments.csv`
+- `processed_indonesia/02_processed.csv`
+- `processed_indonesia/clip_start_matches.json`
+
 ## Processing once, named training runs
 
-Run processing once into the shared root `processed/` directory. This produces `processed/01_segments.csv`, `processed/02_vad.csv`, and the labelled `processed/train.csv` that every later training run reuses:
+Run processing once into `processed_indonesia/`. This produces `processed_indonesia/01_segments.csv` and the corrected `processed_indonesia/02_processed.csv`:
 
 ```bash
 uv run --project processing python processing/00_run_pipeline.py \
-  --output-dir processed \
-  --skip-inference
+  --output-dir processed_indonesia
 ```
 
 Named YAML files in `processing/runs/` are training-only configurations. They set the W&B run name and reference the shared training manifest, while storing checkpoints, split manifests, and evaluation CSVs in their own run-specific output directories.
@@ -32,32 +39,50 @@ uv run --project processing python processing/05_train.py \
 
 ## Inputs and outputs
 
-- Raw audio: `miami/audios/*.mp3`
-- CHAT transcripts: `miami/chat/*.cha`
-- Word-level annotations: `miami/word_level_tsvs/*_cgwords.tsv`
-- Stage 1 output: timestamp-aligned source clips in `processed/01_segments/` and `processed/01_segments.csv`
-- Stage 2 output: VAD-trimmed clips in `processed/02_vad/` and `processed/02_vad.csv`
-- Stage 3 output: normalized training clips in `processed/audio/` and `processed/train.csv`
-- Stage 4 output: Whisper transcription evaluation in `processed/04_whisper_evaluation.csv`
-- Stage 5 output: token-language fine-tuning artifacts in `processed/05_train/`
+- Raw Jember recordings: `indonesian_data/Jember Javanese Spontaneous Speech Corpus/mp3 audio/*.mp3`
+- Jember timestamps/transcripts: `indonesian_data/Jember Javanese Spontaneous Speech Corpus/Jember Javanese Spontaneous Speech Corpus - 1-200.tsv`
+- Development clips and metadata: `indonesian_data/indonesian_dev/clips/*.mp3` and `indonesian_data/indonesian_dev/metadata.tsv`
+- Stage 1 output: source-aligned WAV clips in `processed_indonesia/01_segments/` and `processed_indonesia/01_segments.csv`
+- Stage 2 output: start-corrected Jember transcripts plus unchanged Indonesian development rows in `processed_indonesia/02_processed.csv`; detailed matching results are stored in `processed_indonesia/clip_start_matches.json`
+
+The VAD, normalization, evaluation, and training scripts remain available as standalone utilities, but `00_run_pipeline.py` does not invoke them.
 
 The final `processed/train.csv` contains `audio_path`, `transcript`, `word_langids`, and `language_counts`. `word_langids` is a JSON array of `{ "word", "langid" }` objects, in the same order as the whitespace-separated transcript; `language_counts` is a JSON object that summarizes the retained labels. Intermediate manifests also retain `source_audio`, `start_ms`, `end_ms`, `speakers`, and `utterance_ids` for traceability.
 
-## Stage 1 — CHAT timestamp segmentation
+## Stage 1 — Indonesian source preparation
 
-`01_split_chat_segments.py` pairs every MP3 with its same-named `.cha` file and `_cgwords.tsv` annotation. It counts every CHAT speaker tier so its original utterance number aligns with the TSV `utterance_id`, then uses CHAT timing markers (`\x15start_end\x15`, measured in milliseconds) to place segment boundaries. Consecutive timestamped utterances are combined until adding the next one would exceed 20 seconds; a segment is therefore never longer than 20 seconds, though it can be shorter at a natural transcript boundary.
+`01_prepare_indonesian_segments.py` uses separate preparation paths for the two corpora. Development MP3s are already clip-level, so they are converted directly to mono 16 kHz WAV. For each Jember recording, the script starts at every TSV row and emits every contiguous row extension whose combined transcript contains at least two words and whose TSV range lasts 3–40 seconds. It stops extending a start row when the next window would exceed 40 seconds, then advances the start by one row. The resulting windows intentionally overlap and preserve the original accented transcripts. Stage 1 does not perform VAD or forced alignment.
 
-The TSV surface forms, rather than the CHAT display text, become the canonical training transcript. Parenthesised material and all punctuation are removed; angle brackets are removed while retaining the enclosed words; underscore-linked forms become separate words; and `www`/`xxx` placeholders are excluded. Every retained word keeps its TSV `langid`, including `eng`, `spa`, ambiguous (`eng&spa`), and mixed-morpheme (`eng+spa` / `spa+eng`) labels. `ffmpeg` extracts each time range as a mono 16-bit PCM WAV.
+To build a balanced stage-1 review sample of up to 100 clips from each corpus:
 
-Key options: `--max-seconds` (default `20`), `--audio-dir`, `--chat-dir`, `--tsv-dir`, `--output-dir`, and `--manifest`.
+```bash
+uv run --project processing processing/01_prepare_indonesian_segments.py \
+  --preview-per-dataset 100 \
+  --output-dir processed_indonesia/window_preview/01_segments \
+  --manifest processed_indonesia/window_preview/01_segments.csv
+```
+
+Then serve the repository and open the stage-1 viewer:
+
+```bash
+python3 -m http.server 8000
+```
+
+`http://127.0.0.1:8000/analysis_indonesia/segment_review.html?manifest=../processed_indonesia/window_preview/01_segments.csv`
+
+The viewer can filter by corpus, play each generated WAV, and show its transcript, source range, and included TSV rows. Stage 1 never modifies the source TSV or source MP3s.
+
+The supplied sources do not contain word-level language-ID labels, so each token is retained with the explicit `other` label rather than a fabricated Indonesian/Javanese split.
+
+Key options: `--jember-manifest`, `--jember-audio-dir`, `--development-manifest`, `--development-audio-dir`, `--output-dir`, and `--manifest`.
 
 ## Stage 2 — Silero voice activity detection
 
-`02_vad_trim.py` reads `01_segments.csv`, decodes each source WAV to mono 16 kHz PCM through `ffmpeg`, and passes the samples to Silero VAD. A speech probability threshold of `0.5` is used by default. Adjacent speech regions separated by 20 ms or less are merged, then the retained regions are concatenated to remove non-speech audio. The resulting clips are written as mono, signed 16-bit PCM WAVs at 16 kHz.
+`02_vad_trim.py` reads `01_segments.csv`, decodes each source WAV to mono 16 kHz PCM through `ffmpeg`, and passes the samples to Silero VAD. A speech probability threshold of `0.5` is used by default. VAD is a quality gate only: if any speech is detected, the complete original timestamp segment is copied unchanged. This preserves pauses and keeps every transcript aligned with its audio.
 
-Rows containing no detected speech are kept in `02_vad.csv` with `filtered_out=True`; rows with speech are written to `02_vad/` and marked `filtered_out=False`. This makes rejected material inspectable without retaining a VAD output clip. The script decodes with `ffmpeg` rather than TorchCodec to avoid macOS audio-library compatibility issues.
+Rows containing no detected speech are kept in `02_vad.csv` with `filtered_out=True`; rows with speech are written unchanged to `02_vad/` and marked `filtered_out=False`. Clips are also rejected when their transcript has fewer than 2 words or their source audio is shorter than 3 seconds. Every excluded row has a `filter_reason` of `no_vad_speech`, `too_few_words`, or `too_short`, so rejected material remains inspectable. The script decodes with `ffmpeg` rather than TorchCodec to avoid macOS audio-library compatibility issues.
 
-Key options: `--threshold` (default `0.5`), `--merge-gap-ms` (default `20`), `--manifest`, `--output-dir`, and `--output-manifest`.
+Key options: `--threshold` (default `0.5`), `--min-words` (default `2`), `--min-seconds` (default `3`), `--manifest`, `--output-dir`, and `--output-manifest`.
 
 ## Stage 3 — final normalization
 

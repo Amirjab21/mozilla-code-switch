@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resample VAD-trimmed WAV files to 16 kHz and normalize their loudness."""
+"""Resample VAD-approved WAV files to 16 kHz and normalize their loudness."""
 
 from __future__ import annotations
 
@@ -12,9 +12,9 @@ from pathlib import Path
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, default=Path("processed/02_vad.csv"))
-    parser.add_argument("--output-dir", type=Path, default=Path("processed/audio"))
-    parser.add_argument("--output-csv", type=Path, default=Path("processed/train.csv"))
+    parser.add_argument("--manifest", type=Path, default=Path("processed_indonesia/02_vad.csv"))
+    parser.add_argument("--output-dir", type=Path, default=Path("processed_indonesia/audio"))
+    parser.add_argument("--output-csv", type=Path, default=Path("processed_indonesia/train.csv"))
     parser.add_argument("--ffmpeg", default="ffmpeg")
     args = parser.parse_args()
     if shutil.which(args.ffmpeg) is None:

@@ -1,0 +1,26 @@
+{
+  "title": "Indonesian and Javanese speech datasets",
+  "format": "tabular_audio",
+  "sources": [
+    {
+      "id": "jember",
+      "label": "Jember Javanese Spontaneous Speech Corpus",
+      "manifest": "indonesian_data/Jember Javanese Spontaneous Speech Corpus/Jember Javanese Spontaneous Speech Corpus - 1-200.tsv",
+      "audio_dir": "indonesian_data/Jember Javanese Spontaneous Speech Corpus/mp3 audio/",
+      "audio_id_column": "Audio file name",
+      "audio_extension": ".mp3",
+      "transcript_column": "text",
+      "start_column": "start",
+      "end_column": "end"
+    },
+    {
+      "id": "indonesian_dev",
+      "label": "Indonesian development clips",
+      "manifest": "indonesian_data/indonesian_dev/metadata.tsv",
+      "audio_dir": "indonesian_data/indonesian_dev/clips/",
+      "audio_id_column": "audio_filename",
+      "transcript_column": "transcript",
+      "metadata_columns": ["speaker", "language", "convo_id"]
+    }
+  ]
+}
