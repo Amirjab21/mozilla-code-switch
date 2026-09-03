@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Indonesian stage-1 segment review</title>
+  <style>
+    :root{font-family:Inter,system-ui,sans-serif;color:#172326;background:#eef3f1;--ink:#172326;--muted:#657775;--navy:#173f43;--line:#d7e0de;--active:#dcecea}*{box-sizing:border-box}body{margin:0}header{background:var(--navy);color:#fff;padding:24px}.wrap{width:min(1320px,calc(100% - 28px));margin:auto}h1{margin:0 0 6px}header p{margin:0;color:#d8e8e6}.controls{display:flex;gap:14px;align-items:end;flex-wrap:wrap;padding:18px 0}.controls label{display:grid;gap:4px;color:var(--muted);font-size:.82rem}input,select,button{font:inherit;padding:9px;border:1px solid #aebcba;border-radius:7px;background:#fff}.controls input{min-width:260px}.count{margin-left:auto}.layout{display:grid;grid-template-columns:340px minmax(0,1fr);gap:16px}.panel{background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 2px 8px #173f4310}.list{height:74vh;overflow:auto;padding:8px}.record{display:block;width:100%;text-align:left;padding:11px;border:0;border-bottom:1px solid #e6ecea;background:#fff;cursor:pointer}.record[aria-current=true]{background:var(--active)}.record small,.muted{color:var(--muted)}.detail{padding:24px;min-width:0}.detail audio{width:100%;margin:14px 0}.nav{display:flex;justify-content:space-between;gap:8px}.transcript{font-size:1.15rem;line-height:1.65;background:#f5f8f7;padding:16px;border-radius:8px}.meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:16px}.meta div{background:#eef3f1;padding:12px;border-radius:7px;overflow-wrap:anywhere}.meta span{display:block;color:var(--muted);font-size:.78rem;margin-bottom:3px}.rows{margin-top:18px;padding:14px;background:#fff4dd;border-radius:8px;line-height:1.6}.empty{color:#9a4f00}@media(max-width:800px){.layout{grid-template-columns:1fr}.list{height:34vh}.meta{grid-template-columns:1fr}.count{margin-left:0}}
+  </style>
+</head>
+<body>
+  <header><div class="wrap"><h1>Stage 1 · segment review</h1><p>Review overlapping Jember TSV windows and converted Indonesian development clips.</p></div></header>
+  <main class="wrap">
+    <div class="controls">
+      <label>Dataset<select id="dataset"><option value="all">Both datasets</option><option value="jember">Jember</option><option value="indonesian_development">Development</option></select></label>
+      <label>Search<input id="search" type="search" placeholder="transcript, row or filename"></label>
+      <strong class="count" id="count"></strong>
+    </div>
+    <div class="layout">
+      <aside class="panel list" id="list"></aside>
+      <section class="panel detail" id="detail"><p>Loading manifest…</p></section>
+    </div>
+  </main>
+  <script>
+    const query=new URLSearchParams(location.search);
+    const manifestUrl=new URL(query.get('manifest')||'../processed_indonesia/01_segments.csv',location.href);
+    let rows=[],active=null;
+    const $=selector=>document.querySelector(selector);
+    const escapeHtml=value=>String(value||'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+    function parseCsv(text){const output=[];let row=[],cell='',quoted=false;for(let index=0;index<text.length;index++){const char=text[index];if(char==='"'&&quoted&&text[index+1]==='"'){cell+='"';index++}else if(char==='"')quoted=!quoted;else if(char===','&&!quoted){row.push(cell);cell=''}else if((char==='\n'||char==='\r')&&!quoted){if(char==='\r'&&text[index+1]==='\n')index++;row.push(cell);if(row.some(Boolean))output.push(row);row=[];cell=''}else cell+=char}if(cell||row.length){row.push(cell);output.push(row)}const header=output.shift()||[];return output.map(values=>Object.fromEntries(header.map((key,index)=>[key,values[index]||''])))}
+    function parseJson(value,fallback=[]){try{return JSON.parse(value)}catch{return fallback}}
+    function duration(row){return (+row.end_ms-+row.start_ms)/1000}
+    function visibleRows(){const dataset=$('#dataset').value,needle=$('#search').value.toLowerCase();return rows.filter(row=>(dataset==='all'||row.dataset===dataset)&&(`${row.audio_path} ${row.transcript} ${row.utterance_ids}`.toLowerCase().includes(needle)))}
+    function audioUrl(row){const path=row.audio_path.replace(/^\.\//,'');return new URL('../'+path,location.href)}
+    function selectRelative(offset){const visible=visibleRows(),index=visible.indexOf(active),next=visible[index+offset];if(next){active=next;render()}}
+    function render(){const visible=visibleRows();if(!visible.includes(active))active=visible[0]||null;$('#count').textContent=`${visible.length} of ${rows.length} clips`;$('#list').innerHTML=visible.map(row=>`<button class="record" data-path="${escapeHtml(row.audio_path)}" aria-current="${row===active}"><strong>${escapeHtml(row.audio_path.split('/').pop())}</strong><br><small>${escapeHtml(row.dataset)} · ${duration(row).toFixed(1)}s · ${parseJson(row.utterance_ids).length} source row(s)</small></button>`).join('')||'<p class="empty">No matching clips.</p>';document.querySelectorAll('.record').forEach(button=>button.onclick=()=>{active=rows.find(row=>row.audio_path===button.dataset.path);render()});renderDetail()}
+    function renderDetail(){if(!active){$('#detail').innerHTML='<p>No clip selected.</p>';return}const identifiers=parseJson(active.utterance_ids),position=visibleRows().indexOf(active)+1,total=visibleRows().length;$('#detail').innerHTML=`<div class="nav"><button id="previous" ${position<=1?'disabled':''}>← Previous</button><strong>${position} / ${total}</strong><button id="next" ${position>=total?'disabled':''}>Next →</button></div><h2>${escapeHtml(active.audio_path.split('/').pop())}</h2><audio id="audio" controls preload="metadata" src="${escapeHtml(audioUrl(active))}"></audio><p class="muted">Playhead: <strong id="playhead">0.000s</strong></p><p class="transcript">${escapeHtml(active.transcript)}</p><div class="meta"><div><span>Dataset</span>${escapeHtml(active.dataset)}</div><div><span>Duration</span>${duration(active).toFixed(3)} seconds</div><div><span>Word count</span>${active.transcript.trim().split(/\s+/).filter(Boolean).length}</div><div><span>Source range</span>${(+active.start_ms/1000).toFixed(3)}–${(+active.end_ms/1000).toFixed(3)}s</div><div><span>Preparation</span>${escapeHtml(active.alignment_status)}</div><div><span>Source audio</span>${escapeHtml(active.source_audio)}</div></div><div class="rows"><strong>Included source rows</strong><br>${identifiers.map(escapeHtml).join(' · ')||'No row identifiers'}</div>`;$('#previous').onclick=()=>selectRelative(-1);$('#next').onclick=()=>selectRelative(1);const audio=$('#audio');audio.ontimeupdate=()=>$('#playhead').textContent=`${audio.currentTime.toFixed(3)}s`}
+    ['dataset','search'].forEach(id=>$('#'+id).oninput=render);
+    document.addEventListener('keydown',event=>{if(event.target.matches('input,select'))return;if(event.key==='ArrowLeft')selectRelative(-1);if(event.key==='ArrowRight')selectRelative(1)});
+    fetch(manifestUrl).then(response=>{if(!response.ok)throw Error(`${response.status} ${response.statusText}`);return response.text()}).then(text=>{rows=parseCsv(text);render()}).catch(error=>$('#detail').innerHTML=`<p class="empty">Could not load ${escapeHtml(manifestUrl)}: ${escapeHtml(error.message)}</p>`);
+  </script>
+</body>
+</html>

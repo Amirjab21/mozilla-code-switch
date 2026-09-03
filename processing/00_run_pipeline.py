@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Indonesian dataset preparation, VAD filtering, and audio normalization."""
+"""Run segmentation, start correction, noise augmentation, and Whisper training."""
 
 from __future__ import annotations
 
@@ -12,71 +12,231 @@ from pathlib import Path
 from run_config import apply_defaults, load_section
 
 
+START_MATCH_MODEL = "indonesian-nlp/wav2vec2-indonesian-javanese-sundanese"
+
+
 def run(script: str, arguments: list[str]) -> None:
-    subprocess.run([sys.executable, str(Path(__file__).with_name(script)), *arguments], check=True)
+    subprocess.run(
+        [sys.executable, str(Path(__file__).with_name(script)), *arguments],
+        check=True,
+    )
 
 
 def main() -> None:
     config_parser = argparse.ArgumentParser(add_help=False)
-    config_parser.add_argument("--config", type=Path, help="YAML named-run configuration file.")
+    config_parser.add_argument(
+        "--config", type=Path, help="YAML named-run configuration file."
+    )
     config_args, _ = config_parser.parse_known_args()
     config_values, _ = load_section(config_args.config, "pipeline")
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, help="YAML named-run configuration file.")
-    parser.add_argument("--jember-manifest", type=Path, default=Path("indonesian_data/Jember Javanese Spontaneous Speech Corpus/Jember Javanese Spontaneous Speech Corpus - 1-200.tsv"))
-    parser.add_argument("--jember-audio-dir", type=Path, default=Path("indonesian_data/Jember Javanese Spontaneous Speech Corpus/mp3 audio"))
-    parser.add_argument("--development-manifest", type=Path, default=Path("indonesian_data/indonesian_dev/metadata.tsv"))
-    parser.add_argument("--development-audio-dir", type=Path, default=Path("indonesian_data/indonesian_dev/clips"))
-    parser.add_argument("--output-dir", type=Path, default=Path("processed_indonesia"))
-    parser.add_argument("--max-recordings", type=int, help="Process only the first N recordings (for previews).")
-    parser.add_argument("--max-segments-per-recording", type=int, help="Keep only the first N segments from each recording.")
-    parser.add_argument("--max-development-clips", type=int, help="Keep only the first N development clips (for previews).")
-    parser.add_argument("--preview-per-dataset", type=int, help="Prepare this many clips from each dataset in stage 1.")
-    parser.add_argument("--jember-clips", type=int, help="Limit overlapping Jember TSV-row windows.")
-    parser.add_argument("--development-clips", type=int, help="Limit pre-segmented development clips.")
+    parser.add_argument(
+        "--config", type=Path, help="YAML named-run configuration file."
+    )
+    parser.add_argument(
+        "--jember-manifest",
+        type=Path,
+        default=Path(
+            "indonesian_data/Jember Javanese Spontaneous Speech Corpus/"
+            "Jember Javanese Spontaneous Speech Corpus - 1-200.tsv"
+        ),
+    )
+    parser.add_argument(
+        "--jember-audio-dir",
+        type=Path,
+        default=Path(
+            "indonesian_data/Jember Javanese Spontaneous Speech Corpus/mp3 audio"
+        ),
+    )
+    parser.add_argument(
+        "--development-manifest",
+        type=Path,
+        default=Path("indonesian_data/indonesian_dev/metadata.tsv"),
+    )
+    parser.add_argument(
+        "--development-audio-dir",
+        type=Path,
+        default=Path("indonesian_data/indonesian_dev/clips"),
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("processed_indonesia")
+    )
+
+    # Stage 1: segmentation and 16 kHz conversion.
+    parser.add_argument(
+        "--max-recordings", type=int,
+        help="Process only the first N Jember recordings.",
+    )
+    parser.add_argument(
+        "--max-segments-per-recording", type=int,
+        help="Read only the first N TSV rows per Jember recording.",
+    )
+    parser.add_argument(
+        "--max-development-clips", type=int,
+        help="Deprecated alias for --development-clips.",
+    )
+    parser.add_argument(
+        "--preview-per-dataset", type=int,
+        help="Prepare this many clips from each dataset.",
+    )
+    parser.add_argument(
+        "--jember-clips", type=int,
+        help="Limit overlapping Jember TSV-row windows.",
+    )
+    parser.add_argument(
+        "--development-clips", type=int,
+        help="Limit pre-segmented Indonesian development clips.",
+    )
     parser.add_argument("--min-clip-seconds", type=float, default=3.0)
     parser.add_argument("--max-clip-seconds", type=float, default=40.0)
-    parser.add_argument("--max-clips", type=int, help="Stop after this many valid clips across both datasets.")
-    parser.add_argument("--threshold", type=float, default=0.5)
-    parser.add_argument("--min-words", type=int, default=2, help="Reject transcripts with fewer words.")
-    parser.add_argument("--min-seconds", type=float, default=3.0, help="Reject clips shorter than this duration.")
+    parser.add_argument(
+        "--max-clips", type=int, help="Deprecated final combined cap."
+    )
+    parser.add_argument("--min-words", type=int, default=2)
+    parser.add_argument("--reuse-existing", action="store_true")
+
+    # Stage 2: Wav2Vec2 matching of Jember transcript starts.
+    parser.add_argument("--audio-seconds", type=float, default=5.0)
+    parser.add_argument("--word-search-amount", type=int, default=13)
+    parser.add_argument("--match-words", type=int, default=2)
+    parser.add_argument(
+        "--closeness-metric", choices=("levenshtein",),
+        default="levenshtein",
+    )
+    parser.add_argument("--start-match-model", default=START_MATCH_MODEL)
+    parser.add_argument(
+        "--start-match-device", choices=("auto", "cpu", "cuda", "mps"),
+        default="auto",
+    )
+    parser.add_argument(
+        "--start-match-limit", type=int,
+        help="Process only the first N Jember clips in stage 2.",
+    )
     parser.add_argument("--ffmpeg", default="ffmpeg")
     parser.add_argument("--ffprobe", default="ffprobe")
-    parser.add_argument("--skip-inference", action="store_true", help="Skip step 4 Whisper language inference.")
-    parser.add_argument("--inference-model", default="medium", help="Whisper model name for step 4.")
-    parser.add_argument("--inference-device", default="auto", help="Device for step 4: auto, cpu, cuda, or mps.")
-    parser.add_argument("--inference-limit", type=int, help="Limit the number of clips evaluated in step 4.")
+
+    # Stage 3: additive room-noise augmentation.
+    parser.add_argument(
+        "--noise-dir", type=Path, default=Path("indonesian_data/room_noises")
+    )
+    parser.add_argument("--noise-copies-per-clip", type=int, default=1)
+    parser.add_argument("--min-noise-fraction", type=float, default=0.25)
+    parser.add_argument("--max-noise-fraction", type=float, default=0.75)
+    parser.add_argument("--min-snr-db", type=float, default=5.0)
+    parser.add_argument("--max-snr-db", type=float, default=20.0)
+    parser.add_argument("--augmentation-seed", type=int, default=1337)
+    parser.add_argument(
+        "--training-output-dir", type=Path,
+        help=(
+            "Stage-5 output directory when no `train.output_dir` is supplied "
+            "by --config; defaults beneath --output-dir."
+        ),
+    )
     apply_defaults(parser, config_values, config_args.config)
     args = parser.parse_args()
+
+    configured_training_output: Path | None = None
+    if args.config is not None:
+        train_values, _ = load_section(args.config, "train")
+        if train_values.get("output_dir") is not None:
+            configured_training_output = Path(train_values["output_dir"])
+    training_output_dir = (
+        args.training_output_dir
+        or configured_training_output
+        or args.output_dir / "05_train"
+    )
+
     segment_manifest = args.output_dir / "01_segments.csv"
-    vad_manifest = args.output_dir / "02_vad.csv"
-    split_args = ["--jember-manifest", str(args.jember_manifest), "--jember-audio-dir", str(args.jember_audio_dir), "--development-manifest", str(args.development_manifest), "--development-audio-dir", str(args.development_audio_dir), "--output-dir", str(args.output_dir / "01_segments"), "--manifest", str(segment_manifest), "--ffmpeg", args.ffmpeg, "--ffprobe", args.ffprobe, "--min-clip-seconds", str(args.min_clip_seconds), "--max-clip-seconds", str(args.max_clip_seconds), "--min-words", str(args.min_words)]
-    if args.max_recordings is not None:
-        split_args += ["--max-recordings", str(args.max_recordings)]
-    if args.max_segments_per_recording is not None:
-        split_args += ["--max-segments-per-recording", str(args.max_segments_per_recording)]
-    if args.max_development_clips is not None:
-        split_args += ["--max-development-clips", str(args.max_development_clips)]
-    if args.preview_per_dataset is not None:
-        split_args += ["--preview-per-dataset", str(args.preview_per_dataset)]
-    if args.jember_clips is not None:
-        split_args += ["--jember-clips", str(args.jember_clips)]
-    if args.development_clips is not None:
-        split_args += ["--development-clips", str(args.development_clips)]
-    if args.max_clips is not None:
-        split_args += ["--max-clips", str(args.max_clips)]
-    run("01_prepare_indonesian_segments.py", split_args)
-    run("02_vad_trim.py", ["--manifest", str(segment_manifest), "--output-dir", str(args.output_dir / "02_vad"), "--output-manifest", str(vad_manifest), "--threshold", str(args.threshold), "--min-words", str(args.min_words), "--min-seconds", str(args.min_seconds), "--ffmpeg", args.ffmpeg])
-    run("03_normalize_audio.py", ["--manifest", str(vad_manifest), "--output-dir", str(args.output_dir / "audio"), "--output-csv", str(args.output_dir / "train.csv"), "--ffmpeg", args.ffmpeg])
-    if not args.skip_inference:
-        inference_args = ["--manifest", str(vad_manifest), "--output-csv", str(args.output_dir / "04_whisper_evaluation.csv"), "--model", args.inference_model, "--device", args.inference_device]
-        if args.inference_limit is not None:
-            inference_args += ["--limit", str(args.inference_limit)]
-        run("04_whisper_evaluation.py", inference_args)
+    processed_manifest = args.output_dir / "02_processed.csv"
+    augmented_manifest = args.output_dir / "03_dataset_with_augmented.csv"
+    augmented_audio_dir = args.output_dir / "03_augmented_audio"
+    match_review = args.output_dir / "clip_start_matches.json"
+
+    stage_1_args = [
+        "--jember-manifest", str(args.jember_manifest),
+        "--jember-audio-dir", str(args.jember_audio_dir),
+        "--development-manifest", str(args.development_manifest),
+        "--development-audio-dir", str(args.development_audio_dir),
+        "--output-dir", str(args.output_dir / "01_segments"),
+        "--manifest", str(segment_manifest),
+        "--ffmpeg", args.ffmpeg,
+        "--ffprobe", args.ffprobe,
+        "--min-clip-seconds", str(args.min_clip_seconds),
+        "--max-clip-seconds", str(args.max_clip_seconds),
+        "--min-words", str(args.min_words),
+    ]
+    optional_stage_1_args = (
+        ("--max-recordings", args.max_recordings),
+        ("--max-segments-per-recording", args.max_segments_per_recording),
+        ("--max-development-clips", args.max_development_clips),
+        ("--preview-per-dataset", args.preview_per_dataset),
+        ("--jember-clips", args.jember_clips),
+        ("--development-clips", args.development_clips),
+        ("--max-clips", args.max_clips),
+    )
+    for option, value in optional_stage_1_args:
+        if value is not None:
+            stage_1_args += [option, str(value)]
+    if args.reuse_existing:
+        stage_1_args.append("--reuse-existing")
+    run("01_prepare_indonesian_segments.py", stage_1_args)
+
+    stage_2_args = [
+        "--clips", str(segment_manifest),
+        "--tsv", str(args.jember_manifest),
+        "--output", str(match_review),
+        "--output-csv", str(processed_manifest),
+        "--audio-seconds", str(args.audio_seconds),
+        "--word-search-amount", str(args.word_search_amount),
+        "--match-words", str(args.match_words),
+        "--closeness-metric", args.closeness_metric,
+        "--model", args.start_match_model,
+        "--device", args.start_match_device,
+        "--ffmpeg", args.ffmpeg,
+    ]
+    if args.start_match_limit is not None:
+        stage_2_args += ["--limit", str(args.start_match_limit)]
+    run("02_match_predicted_clip_start.py", stage_2_args)
+
+    stage_3_args = [
+        "--input", str(processed_manifest),
+        "--output", str(augmented_manifest),
+        "--output-dir", str(augmented_audio_dir),
+        "--noise-dir", str(args.noise_dir),
+        "--copies-per-clip", str(args.noise_copies_per_clip),
+        "--min-noise-fraction", str(args.min_noise_fraction),
+        "--max-noise-fraction", str(args.max_noise_fraction),
+        "--min-snr-db", str(args.min_snr_db),
+        "--max-snr-db", str(args.max_snr_db),
+        "--seed", str(args.augmentation_seed),
+    ]
+    run("03_augment_audio_with_noise.py", stage_3_args)
+
+    # Stage 5: Whisper LoRA fine-tuning. The train section of the same YAML is
+    # loaded directly by 05_train.py; the stage-3 manifest is always wired in
+    # explicitly so processing and training cannot accidentally diverge.
+    stage_5_args = ["--manifest", str(augmented_manifest)]
+    if args.config is not None:
+        stage_5_args += ["--config", str(args.config)]
+    if args.training_output_dir is not None:
+        stage_5_args += ["--output-dir", str(args.training_output_dir)]
+    elif args.config is None:
+        stage_5_args += ["--output-dir", str(training_output_dir)]
+    run("05_train.py", stage_5_args)
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "dataset.json").write_text(json.dumps({
         "title": f"Indonesian processing output — {args.output_dir.name}",
-        "paths": {"vad_manifest": "02_vad.csv", "review_audio_dir": "01_segments/", "vad_audio_dir": "02_vad/", "whisper_evaluation": "04_whisper_evaluation.csv"},
+        "paths": {
+            "segments_manifest": "01_segments.csv",
+            "segments_audio_dir": "01_segments/",
+            "processed_manifest": "02_processed.csv",
+            "clip_start_matches": "clip_start_matches.json",
+            "augmented_manifest": "03_dataset_with_augmented.csv",
+            "augmented_audio_dir": "03_augmented_audio/",
+            "training_output_dir": str(training_output_dir),
+        },
     }, indent=2) + "\n", encoding="utf-8")
 
 

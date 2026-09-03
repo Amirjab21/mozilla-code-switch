@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Iterator
 from urllib.parse import quote
 
+from run_config import apply_defaults, load_section
+
 
 FIELDNAMES = [
     "audio_path", "transcript", "source_audio", "start_ms", "end_ms",
@@ -300,7 +302,17 @@ def prepare_development(
 
 
 def main() -> None:
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument(
+        "--config", type=Path, help="YAML named-run configuration file."
+    )
+    config_args, _ = config_parser.parse_known_args()
+    config_values, _ = load_section(config_args.config, "prepare")
+
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config", type=Path, help="YAML named-run configuration file."
+    )
     parser.add_argument("--jember-manifest", type=Path, default=Path("indonesian_data/Jember Javanese Spontaneous Speech Corpus/Jember Javanese Spontaneous Speech Corpus - 1-200.tsv"))
     parser.add_argument("--jember-audio-dir", type=Path, default=Path("indonesian_data/Jember Javanese Spontaneous Speech Corpus/mp3 audio"))
     parser.add_argument("--development-manifest", type=Path, default=Path("indonesian_data/indonesian_dev/metadata.tsv"))
@@ -320,6 +332,7 @@ def main() -> None:
     parser.add_argument("--reuse-existing", action="store_true")
     parser.add_argument("--ffmpeg", default="ffmpeg")
     parser.add_argument("--ffprobe", default="ffprobe")
+    apply_defaults(parser, config_values, config_args.config)
     args = parser.parse_args()
 
     if shutil.which(args.ffmpeg) is None or shutil.which(args.ffprobe) is None:

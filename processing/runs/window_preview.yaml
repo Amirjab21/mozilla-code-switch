@@ -1,0 +1,68 @@
+# Reproduce the Indonesian window-preview preparation and train Whisper Small.
+run_name: window_preview_whisper_small
+
+pipeline:
+  output_dir: processed_indonesia/window_preview
+
+  # Stage 01: one Jember recording, capped at 500 overlapping windows, plus
+  # every available Indonesian-development clip. All audio is converted to
+  # mono 16 kHz PCM WAV and constrained to 3–40 seconds / at least two words.
+  max_recordings: 1
+  jember_clips: 500
+  min_clip_seconds: 3.0
+  max_clip_seconds: 40.0
+  min_words: 2
+  reuse_existing: true
+
+  # Stage 02: correct Jember transcript starts from the first five seconds.
+  audio_seconds: 5.0
+  word_search_amount: 13
+  match_words: 2
+  closeness_metric: levenshtein
+  start_match_model: indonesian-nlp/wav2vec2-indonesian-javanese-sundanese
+  start_match_device: auto
+
+# Run only stage 01 with:
+# uv run --project processing python processing/01_prepare_indonesian_segments.py --config processing/runs/window_preview.yaml
+prepare:
+  output_dir: processed_indonesia/window_preview/01_segments
+  manifest: processed_indonesia/window_preview/01_segments.csv
+  max_recordings: 1
+  jember_clips: 500
+  min_clip_seconds: 3.0
+  max_clip_seconds: 40.0
+  min_words: 2
+  reuse_existing: true
+
+# Run only stage 02 with:
+# uv run --project processing python processing/02_match_predicted_clip_start.py --config processing/runs/window_preview.yaml
+match:
+  clips: processed_indonesia/window_preview/01_segments.csv
+  output: processed_indonesia/window_preview/clip_start_matches.json
+  output_csv: processed_indonesia/window_preview/02_processed.csv
+  audio_seconds: 5.0
+  word_search_amount: 13
+  match_words: 2
+  closeness_metric: levenshtein
+  model: indonesian-nlp/wav2vec2-indonesian-javanese-sundanese
+  device: auto
+
+train:
+  output_dir: processed_indonesia/window_preview/05_whisper_small_full2
+  base_model: small
+  language: id
+  epochs: 20
+  batch_size: 4
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.0
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  eval_indonesian_dev_clips: 10
+  eval_jember_clips: 10
+  eval_set_size: 20
+  eval_every_steps: 250
+  device: mps
+  wandb_project: indonesian-whisper-small-lora
+  wandb_run_name: whisper-small-full-balanced-eval
+  wandb_mode: online

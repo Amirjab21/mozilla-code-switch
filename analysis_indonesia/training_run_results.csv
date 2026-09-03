@@ -1,0 +1,4 @@
+run_name,evaluation_step,evaluated_at,evaluation_csv,clips,reference_words,word_errors,wer,loss,token_loss,language_id_loss,lid_accuracy
+jember-001-first-ten-whisper-small-v2,65,2026-09-03T21:14:09+01:00,processed_indonesia/window_preview/05_whisper_small_first_ten_v2/best_eval_predictions.csv,2,66,6,0.0909090909,0.4072629293,0.4059765339,0.0042879847,1.0000000000
+whisper-small-full-balanced-eval,300,2026-09-03T21:52:33+01:00,processed_indonesia/window_preview/05_whisper_small_full/best_eval_predictions.csv,20,864,220,0.2546296296,0.5264867350,0.5264867350,7.5616154671,0.0859888720
+whisper-small-full-room-noise,750,2026-09-03T23:16:01+01:00,processed_indonesia/window_preview_noise/05_whisper_small_full/best_eval_predictions.csv,20,864,195,0.2256944444,0.4386375096,0.4386375096,7.2186923027,0.1168437026

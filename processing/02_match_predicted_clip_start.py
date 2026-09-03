@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
 
+from run_config import apply_defaults, load_section
+
 
 MODEL_ID = "indonesian-nlp/wav2vec2-indonesian-javanese-sundanese"
 Metric = Callable[[str, str], tuple[float, dict[str, float | int]]]
@@ -311,7 +313,17 @@ def write_processed_manifest(source: Path, output: Path,
 
 
 def main() -> None:
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument(
+        "--config", type=Path, help="YAML named-run configuration file."
+    )
+    config_args, _ = config_parser.parse_known_args()
+    config_values, _ = load_section(config_args.config, "match")
+
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config", type=Path, help="YAML named-run configuration file."
+    )
     parser.add_argument(
         "--clips", type=Path, default=Path("processed_indonesia/01_segments.csv"),
         help="Stage-1 CSV containing Jember and Indonesian development clips.",
@@ -335,6 +347,7 @@ def main() -> None:
     parser.add_argument("--model", default=MODEL_ID)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     parser.add_argument("--ffmpeg", default="ffmpeg")
+    apply_defaults(parser, config_values, config_args.config)
     args = parser.parse_args()
     if args.clips.suffix.lower() != ".csv":
         parser.error("--clips must be the stage-1 CSV so non-Jember rows can pass through")

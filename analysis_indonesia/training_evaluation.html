@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Indonesian training evaluation</title>
+  <style>
+    body{margin:0;background:#10151f;color:#e9edf3;font:16px system-ui,-apple-system,sans-serif}
+    main{max-width:760px;margin:12vh auto;padding:28px;background:#182131;border:1px solid #2d3c55;border-radius:10px}
+    label{display:block;margin-bottom:8px;color:#aebbd0}input{box-sizing:border-box;width:100%;padding:10px;background:#0d131e;color:#fff;border:1px solid #405270;border-radius:6px}
+    button{margin-top:12px;padding:9px 14px}.error{color:#ff9d9d}
+  </style>
+</head>
+<body><main>
+  <h1>Indonesian training evaluation</h1>
+  <p>Enter a folder beneath <code>processed_indonesia</code>.</p>
+  <label for="folder">Run folder</label>
+  <input id="folder" value="window_preview/05_whisper_small_full">
+  <button id="open">Open evaluation</button>
+  <p id="status"></p>
+</main><script>
+const query=new URLSearchParams(location.search),input=document.getElementById('folder'),status=document.getElementById('status');
+function openFolder(){
+  const folder=input.value.trim().replace(/^\/+|\/+$/g,'');
+  if(!folder||folder.split('/').includes('..')){status.className='error';status.textContent='Enter a folder beneath processed_indonesia without “..”.';return}
+  const csv=`../processed_indonesia/${folder}/eval_predictions.csv`;
+  const target=new URL('../analysis/training-run-evaluation.html',location.href);
+  target.searchParams.set('csv',csv);target.searchParams.set('audio_base','..');
+  location.href=target;
+}
+document.getElementById('open').onclick=openFolder;
+input.onkeydown=event=>{if(event.key==='Enter')openFolder()};
+const requested=query.get('folder');
+if(requested){input.value=requested;openFolder()}
+</script></body></html>

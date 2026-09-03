@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import difflib
+import html
 import json
 import os
 import random
@@ -16,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import quote
 
 import torch
 import torch.nn.functional as F
@@ -44,7 +47,19 @@ TRAIN_FRACTION = 0.90
 SPLIT_SEED = 1337
 EVAL_SET_SIZE = 100
 EVAL_EVERY_STEPS = 250
-LID_LOSS_WEIGHT = 0.30
+# Keep the auxiliary language-ID head available for diagnostics, but do not use
+# its loss to update the model during the current ASR-only fine-tuning runs.
+LID_LOSS_WEIGHT = 0.0
+
+
+def combined_training_loss(
+    token_loss: torch.Tensor | float,
+    language_loss: torch.Tensor | float,
+) -> torch.Tensor | float:
+    """Return the configured objective without linking a disabled LID loss."""
+    if LID_LOSS_WEIGHT == 0:
+        return token_loss
+    return token_loss + LID_LOSS_WEIGHT * language_loss
 
 
 def select_device(value: str) -> torch.device:
@@ -108,6 +123,42 @@ def split_preview_rows(
     if not 0 < test_size < len(rows):
         raise ValueError("Preview test size must leave non-empty train and test sets")
     return rows[:-test_size], rows[-test_size:]
+
+
+def split_balanced_dataset_evaluation(
+    rows: list[dict[str, str]],
+    development_count: int,
+    jember_count: int,
+    seed: int,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Hold out deterministic clip samples from both Indonesian datasets."""
+    # Evaluation stays clean. When a selected clean clip has an augmented twin,
+    # exclude the twin from training as well to prevent direct leakage.
+    clean_rows = [
+        row for row in rows
+        if row.get("augmented", "false").casefold() != "true"
+    ]
+    development = [row for row in clean_rows if row.get("dataset") == "indonesian_development"]
+    jember = [row for row in clean_rows if row.get("dataset") == "jember"]
+    if len(development) < development_count or len(jember) < jember_count:
+        raise ValueError(
+            "Balanced evaluation requested "
+            f"{development_count} Indonesian-development and {jember_count} Jember clips, "
+            f"but only {len(development)} and {len(jember)} are available"
+        )
+    rng = random.Random(seed)
+    rng.shuffle(development)
+    rng.shuffle(jember)
+    test = development[:development_count] + jember[:jember_count]
+    test_paths = {row["audio_path"] for row in test}
+    train = [
+        row for row in rows
+        if row["audio_path"] not in test_paths
+        and row.get("augmentation_source_audio", row["audio_path"]) not in test_paths
+    ]
+    if not train:
+        raise ValueError("Balanced evaluation split left no training clips")
+    return train, test
 
 
 def recording_key(row: dict[str, str]) -> str:
@@ -221,7 +272,7 @@ def model_losses(model, batch: dict[str, Any], device: torch.device) -> tuple[to
     else:
         lid_loss = torch.zeros((), device=device)
         correct = 0
-    return asr_loss, lid_loss, asr_loss + LID_LOSS_WEIGHT * lid_loss, correct, lid_count
+    return asr_loss, lid_loss, combined_training_loss(asr_loss, lid_loss), correct, lid_count
 
 
 @torch.no_grad()
@@ -246,7 +297,7 @@ def per_example_loss_values(model, batch: dict[str, Any], device: torch.device) 
         values.append({
             "token_loss": token_loss,
             "language_id_loss": language_loss,
-            "loss": token_loss + LID_LOSS_WEIGHT * language_loss,
+            "loss": combined_training_loss(token_loss, language_loss),
         })
     return values
 
@@ -298,7 +349,7 @@ def evaluate(
     token_loss = total_asr_loss / max(batches, 1)
     language_id_loss = total_lid_loss / max(batches, 1)
     return {
-        "eval/loss": token_loss + LID_LOSS_WEIGHT * language_id_loss,
+        "eval/loss": combined_training_loss(token_loss, language_id_loss),
         "eval/token_loss": token_loss,
         "eval/language_id_loss": language_id_loss,
         "eval/lid_accuracy": correct_lid / total_lid if total_lid else float("nan"),
@@ -392,9 +443,30 @@ def write_evaluation_html(path: Path, rows: list[dict[str, str]], run_name: str,
     page_rows = []
     for row in rows:
         audio_path = Path(row["audio_file_path"]).resolve()
+        reference_words = normalise_for_wer(row["ground_truth_transcript"])
+        predicted_words = normalise_for_wer(row["predicted_transcript"])
+        reference_diff: list[str] = []
+        prediction_diff: list[str] = []
+        for operation, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            None, reference_words, predicted_words
+        ).get_opcodes():
+            reference_text = html.escape(" ".join(reference_words[i1:i2]))
+            prediction_text = html.escape(" ".join(predicted_words[j1:j2]))
+            css_class = {
+                "equal": "correct",
+                "replace": "substitution",
+                "delete": "deletion",
+                "insert": "insertion",
+            }[operation]
+            if reference_text:
+                reference_diff.append(f'<span class="{css_class}">{reference_text}</span>')
+            if prediction_text:
+                prediction_diff.append(f'<span class="{css_class}">{prediction_text}</span>')
         page_rows.append({
             **row,
             "audio_src": os.path.relpath(audio_path, path.parent.resolve()).replace(os.sep, "/"),
+            "reference_diff": " ".join(reference_diff),
+            "prediction_diff": " ".join(prediction_diff),
         })
     payload = json.dumps(page_rows, ensure_ascii=False).replace("</", "<\\/")
     template = """<!doctype html>
@@ -404,11 +476,11 @@ def write_evaluation_html(path: Path, rows: list[dict[str, str]], run_name: str,
 body{margin:0;background:#10151f;color:#e9edf3;font:16px system-ui,-apple-system,sans-serif}.wrap{max-width:980px;margin:0 auto;padding:28px}
 h1{margin:0 0 6px}.sub{color:#aebbd0;margin:0 0 20px}.controls{display:flex;gap:10px;align-items:center;margin:18px 0}.controls button{padding:8px 12px}.controls input{flex:1}
 .card{background:#182131;border:1px solid #2d3c55;border-radius:10px;padding:20px}.label{display:block;color:#aebbd0;font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin:18px 0 5px}
-.text{white-space:pre-wrap;line-height:1.45}.labels{white-space:pre-wrap;overflow:auto;background:#0d131e;padding:12px;border-radius:6px;font:12px ui-monospace,monospace}audio{width:100%;margin-top:8px}
-</style></head><body><main class="wrap"><h1>Held-out training evaluation</h1><p class="sub">Run: __RUN_NAME__ · Best evaluation loss: __BEST_LOSS__ · <span id="count"></span></p>
+.text{white-space:pre-wrap;line-height:1.55}.diff span{display:inline-block;padding:1px 3px;margin:1px;border-radius:3px}.correct{color:#c9d4e5}.substitution{background:#71313b;color:#fff}.deletion{background:#71313b;color:#fff;text-decoration:line-through}.insertion{background:#24577a;color:#fff}.legend{color:#aebbd0;font-size:.85rem}.labels{white-space:pre-wrap;overflow:auto;background:#0d131e;padding:12px;border-radius:6px;font:12px ui-monospace,monospace}audio{width:100%;margin-top:8px}
+</style></head><body><main class="wrap"><h1>Held-out training evaluation</h1><p class="sub">Run: __RUN_NAME__ · Evaluation loss: __BEST_LOSS__ · <span id="count"></span></p>
 <div class="controls"><label>Sort <select id="sort"><option value="original">Original order</option><option value="wer-desc">WER: highest first</option><option value="wer-asc">WER: lowest first</option><option value="loss-desc">Loss: highest first</option><option value="loss-asc">Loss: lowest first</option><option value="language_id_loss-desc">Language-ID loss: highest first</option><option value="language_id_loss-asc">Language-ID loss: lowest first</option><option value="token_loss-desc">Token loss: highest first</option><option value="token_loss-asc">Token loss: lowest first</option></select></label><button id="previous">← Previous</button><input id="position" type="range" min="0" value="0"><button id="next">Next →</button></div>
-<section class="card"><strong id="title"></strong><audio id="audio" controls preload="metadata"></audio><span class="label">Clip metrics</span><div class="text" id="metrics"></div><span class="label">Ground-truth transcript</span><div class="text" id="reference"></div><span class="label">Predicted transcript</span><div class="text" id="prediction"></div><span class="label">Ground-truth language labels</span><div class="labels" id="labels"></div><span class="label">Predicted language labels</span><div class="labels" id="predictedLabels"></div></section>
-</main><script>let rows=__DATA__;const originalRows=rows.slice();let current=0;const $=id=>document.getElementById(id);const format=value=>Number.isFinite(Number(value))?Number(value).toFixed(4):'not available';function show(){const r=rows[current];$('position').value=current;$('title').textContent=`Clip ${current+1} of ${rows.length}: ${r.audio_file_path}`;$('audio').src=r.audio_src;$('metrics').textContent=`WER: ${format(r.wer)} · Loss: ${format(r.loss)} · Language-ID loss: ${format(r.language_id_loss)} · Token loss: ${format(r.token_loss)}`;$('reference').textContent=r.ground_truth_transcript;$('prediction').textContent=r.predicted_transcript;$('labels').textContent=r.language_labels;$('predictedLabels').textContent=r.predicted_language_labels}function sortRows(){const [field,direction]=$('sort').value.split('-');rows=originalRows.slice();current=0;if(field!=='original'){const multiplier=direction==='desc'?-1:1;rows.sort((a,b)=>multiplier*((Number(a[field])||0)-(Number(b[field])||0)))}show()}$('position').max=Math.max(rows.length-1,0);$('count').textContent=`${rows.length} clips`;$('previous').onclick=()=>{current=(current+rows.length-1)%rows.length;show()};$('next').onclick=()=>{current=(current+1)%rows.length;show()};$('position').oninput=e=>{current=Number(e.target.value);show()};$('sort').onchange=sortRows;if(rows.length)show();</script></body></html>"""
+<section class="card"><strong id="title"></strong><audio id="audio" controls preload="metadata"></audio><span class="label">Clip metrics</span><div class="text" id="metrics"></div><span class="label">Scored word differences</span><div class="legend">Red = substitution/deletion · Blue = insertion</div><div class="text diff" id="referenceDiff"></div><div class="text diff" id="predictionDiff"></div><span class="label">Ground-truth transcript</span><div class="text" id="reference"></div><span class="label">Predicted transcript</span><div class="text" id="prediction"></div><span class="label">Ground-truth language labels</span><div class="labels" id="labels"></div><span class="label">Predicted language labels</span><div class="labels" id="predictedLabels"></div></section>
+</main><script>let rows=__DATA__;const originalRows=rows.slice();let current=0;const $=id=>document.getElementById(id);const format=value=>Number.isFinite(Number(value))?Number(value).toFixed(4):'not available';function show(){const r=rows[current];$('position').value=current;$('title').textContent=`Clip ${current+1} of ${rows.length}: ${r.audio_file_path}`;$('audio').src=r.audio_src;$('metrics').textContent=`WER: ${format(r.wer)} · Word errors: ${r.word_errors}/${r.reference_words} · Loss: ${format(r.loss)} · Token loss: ${format(r.token_loss)}`;$('referenceDiff').innerHTML=`Reference: ${r.reference_diff}`;$('predictionDiff').innerHTML=`Prediction: ${r.prediction_diff}`;$('reference').textContent=r.ground_truth_transcript;$('prediction').textContent=r.predicted_transcript;$('labels').textContent=r.language_labels;$('predictedLabels').textContent=r.predicted_language_labels}function sortRows(){const [field,direction]=$('sort').value.split('-');rows=originalRows.slice();current=0;if(field!=='original'){const multiplier=direction==='desc'?-1:1;rows.sort((a,b)=>multiplier*((Number(a[field])||0)-(Number(b[field])||0)))}show()}$('position').max=Math.max(rows.length-1,0);$('count').textContent=`${rows.length} clips`;$('previous').onclick=()=>{current=(current+rows.length-1)%rows.length;show()};$('next').onclick=()=>{current=(current+1)%rows.length;show()};$('position').oninput=e=>{current=Number(e.target.value);show()};$('sort').onchange=sortRows;if(rows.length)show();</script></body></html>"""
     path.write_text(
         template.replace("__DATA__", payload)
         .replace("__RUN_NAME__", run_name)
@@ -438,6 +510,14 @@ def main() -> None:
             "Restrict the run to jember_001_0001-0001 through "
             "jember_001_0001-0010 and use a deterministic 8/2 diagnostic split."
         ),
+    )
+    parser.add_argument(
+        "--eval-indonesian-dev-clips", type=int, default=0,
+        help="Hold out exactly this many Indonesian-development clips.",
+    )
+    parser.add_argument(
+        "--eval-jember-clips", type=int, default=0,
+        help="Hold out exactly this many Jember clips.",
     )
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
@@ -475,6 +555,16 @@ def main() -> None:
         parser.error("--max-samples must be at least 2 so both train and test partitions are non-empty")
     if args.max_train_steps is not None and args.max_train_steps < 1:
         parser.error("--max-train-steps must be positive")
+    if args.eval_indonesian_dev_clips < 0 or args.eval_jember_clips < 0:
+        parser.error("Balanced evaluation clip counts cannot be negative")
+    if bool(args.eval_indonesian_dev_clips) != bool(args.eval_jember_clips):
+        parser.error(
+            "Use --eval-indonesian-dev-clips and --eval-jember-clips together"
+        )
+    if args.jember_001_first_ten and args.eval_indonesian_dev_clips:
+        parser.error(
+            "--jember-001-first-ten cannot be combined with the balanced evaluation split"
+        )
     if not 0 < TRAIN_FRACTION < 1:
         raise RuntimeError("TRAIN_FRACTION must be between zero and one")
 
@@ -490,6 +580,17 @@ def main() -> None:
         rows = filter_jember_001_first_ten(rows)
         train_rows, test_rows = split_preview_rows(rows)
         split_unit = "diagnostic Jember windows (first eight train, final two test)"
+    elif args.eval_indonesian_dev_clips:
+        train_rows, test_rows = split_balanced_dataset_evaluation(
+            rows,
+            args.eval_indonesian_dev_clips,
+            args.eval_jember_clips,
+            args.seed,
+        )
+        split_unit = (
+            f"balanced clips ({args.eval_indonesian_dev_clips} Indonesian-development, "
+            f"{args.eval_jember_clips} Jember)"
+        )
     elif args.max_samples is not None:
         rng = random.Random(args.seed)
         rng.shuffle(rows)
@@ -547,13 +648,17 @@ def main() -> None:
     reached_step_limit = False
     best_eval_loss = float("inf")
     best_eval_rows: list[dict[str, str]] = []
+    latest_eval_loss = float("inf")
+    latest_eval_rows: list[dict[str, str]] = []
     run_label = str(run.name or args.wandb_run_name or "local")
 
     def run_evaluation(step: int) -> dict[str, float]:
-        nonlocal best_eval_loss, best_eval_rows
+        nonlocal best_eval_loss, best_eval_rows, latest_eval_loss, latest_eval_rows
         metrics, evaluation_rows = evaluate(
             model, eval_loader, eval_dataset, device, language=args.language
         )
+        latest_eval_loss = metrics["eval/loss"]
+        latest_eval_rows = evaluation_rows
         write_evaluation_csv(args.output_dir / "eval_predictions.csv", evaluation_rows)
         metrics["eval/best_loss"] = min(best_eval_loss, metrics["eval/loss"])
         if metrics["eval/loss"] < best_eval_loss:
@@ -621,12 +726,33 @@ def main() -> None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_run_label = re.sub(r"[^A-Za-z0-9_-]+", "_", run_label)
         html_path = args.analysis_dir / f"{timestamp}_run_{safe_run_label}.html"
-        write_evaluation_html(html_path, best_eval_rows, run_label, best_eval_loss)
+        write_evaluation_html(html_path, latest_eval_rows, run_label, latest_eval_loss)
         run.summary["best_eval_loss"] = best_eval_loss
         run.summary["best_lora_adapter"] = str(args.output_dir / "best_lora")
-        run.summary["evaluation_csv"] = str(args.output_dir / "best_eval_predictions.csv")
+        run.summary["evaluation_csv"] = str(args.output_dir / "eval_predictions.csv")
         run.summary["evaluation_html"] = str(html_path)
-        print(f"Wrote best held-out evaluation review to {html_path}")
+        print(f"Wrote final held-out evaluation review to {html_path}")
+        try:
+            relative_html = html_path.resolve().relative_to(REPOSITORY_ROOT)
+        except ValueError:
+            print(f"Evaluation review: {html_path.resolve().as_uri()}")
+        else:
+            print(
+                "Evaluation review: "
+                f"http://127.0.0.1:8000/{quote(relative_html.as_posix())}"
+            )
+        try:
+            relative_output = args.output_dir.resolve().relative_to(
+                REPOSITORY_ROOT / "processed_indonesia"
+            )
+        except ValueError:
+            pass
+        else:
+            print(
+                "Reusable evaluation viewer: "
+                "http://127.0.0.1:8000/analysis_indonesia/training_evaluation.html"
+                f"?folder={quote(relative_output.as_posix())}"
+            )
     finally:
         run.finish()
 
