@@ -46,6 +46,16 @@ def make_token_language_targets(
     source_words = [normalise_word(item["word"]) for item in word_langids]
     decoded_words = [normalise_word(word) for word in decoded_words]
     if decoded_words != source_words:
+        # A uniformly labelled transcript does not require word-boundary
+        # reconstruction: every BPE token receives the same class. This is
+        # important for corpora such as the Indonesian/Javanese data, whose
+        # labels are all `other` and whose punctuation/hyphens Whisper may
+        # split into separate word groups.
+        languages = [canonical_language_id(item["langid"]) for item in word_langids]
+        unique_languages = set(languages)
+        if len(unique_languages) == 1 and None not in unique_languages:
+            language = languages[0]
+            return token_ids, [class_to_id[language]] * len(token_ids)
         raise ValueError(
             "Whisper tokenisation did not round-trip to word_langids; refusing to create misaligned labels."
         )

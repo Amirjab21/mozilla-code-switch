@@ -96,6 +96,28 @@
       return data.filter(values => values.some(Boolean)).map(values => Object.fromEntries(headers.map((header, i) => [header, values[i] || ''])));
     }
     function parseLabels(value) { try { return JSON.parse(value); } catch { return []; } }
+    function mergeHyphenatedPredictions(labels) {
+      const merged = [];
+      labels.forEach(item => {
+        const word = String(item.word || '');
+        if (/^[-‐‑–—]/u.test(word) && merged.length) {
+          const previous = merged[merged.length - 1];
+          const previousTokens = Array.isArray(previous.token_ids) ? previous.token_ids.length : 1;
+          const currentTokens = Array.isArray(item.token_ids) ? item.token_ids.length : 1;
+          const totalTokens = previousTokens + currentTokens;
+          previous.word += word;
+          previous.token_ids = [...(previous.token_ids || []), ...(item.token_ids || [])];
+          previous.confidence = (
+            Number(previous.confidence || 0) * previousTokens
+            + Number(item.confidence || 0) * currentTokens
+          ) / totalTokens;
+          if (Number(item.confidence || 0) > Number(previous.confidence || 0)) {
+            previous.language_id = item.language_id;
+          }
+        } else merged.push({...item});
+      });
+      return merged;
+    }
     function languageClass(label) {
       const lower = String(label || '').toLowerCase();
       if (lower === 'eng') return 'eng'; if (lower === 'spa') return 'spa';
@@ -213,7 +235,10 @@
       $('transcriptionStatus').textContent = '';
       const groundTruthLabels = parseLabels(row.language_labels);
       renderReferenceLabels(groundTruthLabels);
-      renderLanguageVisualisation(groundTruthLabels, parseLabels(row.predicted_language_labels));
+      renderLanguageVisualisation(
+        groundTruthLabels,
+        mergeHyphenatedPredictions(parseLabels(row.predicted_language_labels)),
+      );
     }
     function sortRows() {
       const [field, direction] = $('sort').value.split('-');

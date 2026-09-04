@@ -69,7 +69,27 @@ def decode_with_token_language(
 
     token_languages = [model.language_labels[int(probs.argmax())] for probs in language_probabilities]
     token_confidences = [float(probs.max()) for probs in language_probabilities]
-    words, word_token_groups = tokenizer.split_to_word_tokens(generated)
+    try:
+        words, word_token_groups = tokenizer.split_to_word_tokens(generated)
+    except IndexError:
+        # During early fine-tuning, greedy decoding can stop after an incomplete
+        # multi-byte UTF-8 token sequence.  openai-whisper's Unicode word
+        # splitter assumes the full sequence is valid and indexes beyond the
+        # decoded string in that case.  Keep evaluation running; the decoded
+        # transcript above is still suitable for WER, while this fallback
+        # reports one aggregate language-labelled span in the review output.
+        words = [tokenizer.decode(generated)] if generated else []
+        word_token_groups = [generated] if generated else []
+    merged_words: list[str] = []
+    merged_token_groups: list[list[int]] = []
+    for word, group in zip(words, word_token_groups):
+        if word.startswith(("-", "‐", "‑", "–", "—")) and merged_words:
+            merged_words[-1] += word
+            merged_token_groups[-1].extend(group)
+        else:
+            merged_words.append(word)
+            merged_token_groups.append(list(group))
+    words, word_token_groups = merged_words, merged_token_groups
     word_results: list[dict[str, object]] = []
     offset = 0
     for word, group in zip(words, word_token_groups):

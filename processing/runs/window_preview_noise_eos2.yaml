@@ -1,0 +1,25 @@
+# Training-only comparison: reuse the completed noisy dataset and double the
+# end-of-transcript token's contribution to ASR cross entropy.
+run_name: window_preview_noise_eos2
+
+train:
+  manifest: processed_indonesia/window_preview_noise/03_dataset_with_augmented.csv
+  output_dir: processed_indonesia/window_preview_noise/05_whisper_small_full_eos2
+  base_model: small
+  language: id
+  epochs: 20
+  batch_size: 4
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.0
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  eos_loss_weight: 2.0
+  eval_indonesian_dev_clips: 10
+  eval_jember_clips: 10
+  eval_set_size: 20
+  eval_every_steps: 250
+  device: mps
+  wandb_project: indonesian-whisper-small-lora
+  wandb_run_name: whisper-small-full-room-noise-eos2
+  wandb_mode: online

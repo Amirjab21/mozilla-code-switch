@@ -256,14 +256,46 @@ def collate_batch(items: list[dict[str, Any]], tokenizer) -> dict[str, Any]:
     }
 
 
-def model_losses(model, batch: dict[str, Any], device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
+def weighted_asr_loss(
+    token_logits: torch.Tensor,
+    targets: torch.Tensor,
+    eos_token_id: int,
+    eos_loss_weight: float,
+    *,
+    per_example: bool = False,
+) -> torch.Tensor:
+    """Cross entropy with explicit weighting for the end-of-transcript target."""
+    losses = F.cross_entropy(
+        token_logits.transpose(1, 2),
+        targets,
+        ignore_index=IGNORE_INDEX,
+        reduction="none",
+    )
+    valid = targets.ne(IGNORE_INDEX)
+    weights = torch.ones_like(losses)
+    weights = torch.where(targets.eq(eos_token_id), eos_loss_weight, weights)
+    weights = weights * valid
+    if per_example:
+        return (losses * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1)
+    return (losses * weights).sum() / weights.sum().clamp_min(1)
+
+
+def model_losses(
+    model,
+    batch: dict[str, Any],
+    device: torch.device,
+    eos_token_id: int,
+    eos_loss_weight: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
     mels = batch["mels"].to(device)
     inputs = batch["inputs"].to(device)
     asr_targets = batch["asr_targets"].to(device)
     lid_targets = batch["lid_targets"].to(device)
     audio_features = model.encoder(mels)
     token_logits, language_logits = model.logits_with_language(inputs, audio_features)
-    asr_loss = F.cross_entropy(token_logits.transpose(1, 2), asr_targets, ignore_index=IGNORE_INDEX)
+    asr_loss = weighted_asr_loss(
+        token_logits, asr_targets, eos_token_id, eos_loss_weight
+    )
     valid_lid = lid_targets.ne(IGNORE_INDEX)
     lid_count = int(valid_lid.sum().item())
     if lid_count:
@@ -276,7 +308,13 @@ def model_losses(model, batch: dict[str, Any], device: torch.device) -> tuple[to
 
 
 @torch.no_grad()
-def per_example_loss_values(model, batch: dict[str, Any], device: torch.device) -> list[dict[str, float]]:
+def per_example_loss_values(
+    model,
+    batch: dict[str, Any],
+    device: torch.device,
+    eos_token_id: int,
+    eos_loss_weight: float,
+) -> list[dict[str, float]]:
     """Calculate the three training objectives independently for every clip in a batch."""
     mels = batch["mels"].to(device)
     inputs = batch["inputs"].to(device)
@@ -290,7 +328,13 @@ def per_example_loss_values(model, batch: dict[str, Any], device: torch.device) 
         valid = targets.ne(IGNORE_INDEX)
         return (losses * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
 
-    token_losses = mean_per_clip(token_logits, asr_targets)
+    token_losses = weighted_asr_loss(
+        token_logits,
+        asr_targets,
+        eos_token_id,
+        eos_loss_weight,
+        per_example=True,
+    )
     language_losses = mean_per_clip(language_logits, lid_targets)
     values = []
     for token_loss, language_loss in zip(token_losses.tolist(), language_losses.tolist()):
@@ -308,6 +352,8 @@ def evaluate(
     loader: DataLoader,
     dataset: MiamiDataset,
     device: torch.device,
+    eos_token_id: int,
+    eos_loss_weight: float,
     language: str | None = None,
 ) -> tuple[dict[str, float], list[dict[str, str]]]:
     model.eval()
@@ -315,13 +361,18 @@ def evaluate(
     batches = correct_lid = total_lid = 0
     losses_by_audio_path: dict[str, dict[str, float]] = {}
     for batch in tqdm(loader, desc="Held-out loss", leave=False):
-        asr_loss, lid_loss, _, correct, count = model_losses(model, batch, device)
+        asr_loss, lid_loss, _, correct, count = model_losses(
+            model, batch, device, eos_token_id, eos_loss_weight
+        )
         total_asr_loss += float(asr_loss)
         total_lid_loss += float(lid_loss)
         batches += 1
         correct_lid += correct
         total_lid += count
-        for row, values in zip(batch["rows"], per_example_loss_values(model, batch, device)):
+        per_clip_losses = per_example_loss_values(
+            model, batch, device, eos_token_id, eos_loss_weight
+        )
+        for row, values in zip(batch["rows"], per_clip_losses):
             losses_by_audio_path[row["audio_path"]] = values
 
     substitutions = deletions = insertions = reference_words = 0
@@ -529,6 +580,10 @@ def main() -> None:
     parser.add_argument("--max-train-steps", type=int, help="Stop after this many optimizer steps, while still running final evaluation and checkpointing.")
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument(
+        "--eos-loss-weight", type=float, default=1.0,
+        help="Relative cross-entropy weight for the end-of-transcript token.",
+    )
     parser.add_argument("--eval-every-steps", type=int, default=EVAL_EVERY_STEPS)
     parser.add_argument("--eval-set-size", type=int, default=EVAL_SET_SIZE)
     parser.add_argument("--seed", type=int, default=SPLIT_SEED)
@@ -555,6 +610,8 @@ def main() -> None:
         parser.error("--max-samples must be at least 2 so both train and test partitions are non-empty")
     if args.max_train_steps is not None and args.max_train_steps < 1:
         parser.error("--max-train-steps must be positive")
+    if args.eos_loss_weight <= 0:
+        parser.error("--eos-loss-weight must be positive")
     if args.eval_indonesian_dev_clips < 0 or args.eval_jember_clips < 0:
         parser.error("Balanced evaluation clip counts cannot be negative")
     if bool(args.eval_indonesian_dev_clips) != bool(args.eval_jember_clips):
@@ -655,7 +712,13 @@ def main() -> None:
     def run_evaluation(step: int) -> dict[str, float]:
         nonlocal best_eval_loss, best_eval_rows, latest_eval_loss, latest_eval_rows
         metrics, evaluation_rows = evaluate(
-            model, eval_loader, eval_dataset, device, language=args.language
+            model,
+            eval_loader,
+            eval_dataset,
+            device,
+            tokenizer.eot,
+            args.eos_loss_weight,
+            language=args.language,
         )
         latest_eval_loss = metrics["eval/loss"]
         latest_eval_rows = evaluation_rows
@@ -691,7 +754,13 @@ def main() -> None:
                 optimizer.zero_grad(set_to_none=True)
                 autocast = torch.autocast(device_type="cuda", dtype=torch.float16) if device.type == "cuda" else contextlib.nullcontext()
                 with autocast:
-                    asr_loss, lid_loss, loss, correct, lid_count = model_losses(model, batch, device)
+                    asr_loss, lid_loss, loss, correct, lid_count = model_losses(
+                        model,
+                        batch,
+                        device,
+                        tokenizer.eot,
+                        args.eos_loss_weight,
+                    )
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
