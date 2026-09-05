@@ -8,6 +8,7 @@ import contextlib
 import csv
 import difflib
 import gc
+import heapq
 import html
 import json
 import os
@@ -53,6 +54,7 @@ TRAIN_FRACTION = 0.90
 SPLIT_SEED = 1337
 EVAL_SET_SIZE = 100
 EVAL_EVERY_STEPS = 250
+HIGHEST_TRAINING_LOSSES = 20
 # Keep the auxiliary language-ID head available for diagnostics, but do not use
 # its loss to update the model during the current ASR-only fine-tuning runs.
 LID_LOSS_WEIGHT = 0.0
@@ -120,6 +122,8 @@ def save_training_progress(
     batch_size: int,
     seed: int,
     training_clips: int,
+    current_loss_heap: list[tuple[float, str]] | None = None,
+    completed_high_losses: list[dict[str, Any]] | None = None,
 ) -> None:
     """Persist progress and optimizer state corresponding to saved adapter weights."""
     progress = {
@@ -135,6 +139,8 @@ def save_training_progress(
         "training_clips": training_clips,
         "best_eval_loss": best_eval_loss,
         "best_eval_wer": best_eval_wer,
+        "current_loss_heap": current_loss_heap or [],
+        "completed_high_losses": completed_high_losses or [],
         "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
     (checkpoint_dir / "training_progress.json").write_text(
@@ -295,6 +301,67 @@ def split_balanced_dataset_evaluation(
     return train, test
 
 
+def split_indonesian_development_speaker_evaluation(
+    rows: list[dict[str, str]],
+    fully_held_out_speakers: set[str],
+    other_speaker_clips: int,
+    seed: int,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Build a clean development-only evaluation split grouped by speaker.
+
+    Every clean clip belonging to ``fully_held_out_speakers`` is selected. For
+    every other Indonesian-development speaker, ``other_speaker_clips`` clean
+    clips are selected deterministically. Augmented copies of selected clips
+    are also removed from training to prevent source-audio leakage.
+    """
+    clean_development = [
+        row
+        for row in rows
+        if row.get("dataset") == "indonesian_development"
+        and row.get("augmented", "false").casefold() != "true"
+        and row.get("speed_augmented", "false").casefold() != "true"
+    ]
+    by_speaker: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in clean_development:
+        by_speaker[row.get("speakers", "unknown")].append(row)
+
+    missing = sorted(fully_held_out_speakers - set(by_speaker))
+    if missing:
+        raise ValueError(
+            "Requested fully held-out Indonesian-development speakers are missing: "
+            + ", ".join(missing)
+        )
+
+    selected: list[dict[str, str]] = []
+    rng = random.Random(seed)
+    for speaker in sorted(by_speaker, key=lambda value: (not value.isdigit(), value)):
+        speaker_rows = by_speaker[speaker][:]
+        rng.shuffle(speaker_rows)
+        if speaker in fully_held_out_speakers:
+            selected.extend(speaker_rows)
+        else:
+            if len(speaker_rows) < other_speaker_clips:
+                raise ValueError(
+                    f"Indonesian-development speaker {speaker} has only "
+                    f"{len(speaker_rows)} clean clips; {other_speaker_clips} were requested"
+                )
+            selected.extend(speaker_rows[:other_speaker_clips])
+
+    if not selected:
+        raise ValueError("The Indonesian-development speaker evaluation split is empty")
+    selected_paths = {row["audio_path"] for row in selected}
+    train = [
+        row
+        for row in rows
+        if row["audio_path"] not in selected_paths
+        and row.get("augmentation_source_audio", row["audio_path"])
+        not in selected_paths
+    ]
+    if not train:
+        raise ValueError("Speaker-based evaluation split left no training clips")
+    return train, selected
+
+
 def recording_key(row: dict[str, str]) -> str:
     """Derive the original recording ID from a `recording_0001.wav` output name."""
     stem = Path(row["audio_path"]).stem
@@ -420,7 +487,7 @@ def model_losses(
     device: torch.device,
     eos_token_id: int,
     eos_loss_weight: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, torch.Tensor]:
     mels = batch["mels"].to(device)
     inputs = batch["inputs"].to(device)
     asr_targets = batch["asr_targets"].to(device)
@@ -430,6 +497,13 @@ def model_losses(
     asr_loss = weighted_asr_loss(
         token_logits, asr_targets, eos_token_id, eos_loss_weight
     )
+    per_example_losses = weighted_asr_loss(
+        token_logits,
+        asr_targets,
+        eos_token_id,
+        eos_loss_weight,
+        per_example=True,
+    )
     valid_lid = lid_targets.ne(IGNORE_INDEX)
     lid_count = int(valid_lid.sum().item())
     if lid_count:
@@ -438,7 +512,14 @@ def model_losses(
     else:
         lid_loss = torch.zeros((), device=device)
         correct = 0
-    return asr_loss, lid_loss, combined_training_loss(asr_loss, lid_loss), correct, lid_count
+    return (
+        asr_loss,
+        lid_loss,
+        combined_training_loss(asr_loss, lid_loss),
+        correct,
+        lid_count,
+        per_example_losses,
+    )
 
 
 @torch.no_grad()
@@ -495,7 +576,7 @@ def evaluate(
     batches = correct_lid = total_lid = 0
     losses_by_audio_path: dict[str, dict[str, float]] = {}
     for batch in tqdm(loader, desc="Held-out loss", leave=False):
-        asr_loss, lid_loss, _, correct, count = model_losses(
+        asr_loss, lid_loss, _, correct, count, _ = model_losses(
             model, batch, device, eos_token_id, eos_loss_weight
         )
         total_asr_loss += float(asr_loss)
@@ -574,6 +655,13 @@ RUN_RESULTS_FIELDS = [
     "language_id_loss",
     "lid_accuracy",
 ]
+HIGH_LOSS_FIELDS = [
+    "audio_path",
+    "epoch",
+    "loss",
+    "predicted_transcript",
+    "actual_transcript",
+]
 
 
 def write_evaluation_csv(path: Path, rows: list[dict[str, str]]) -> None:
@@ -582,6 +670,52 @@ def write_evaluation_csv(path: Path, rows: list[dict[str, str]]) -> None:
         writer = csv.DictWriter(file, fieldnames=EVAL_CSV_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def write_highest_training_losses(
+    path: Path, rows: list[dict[str, str]]
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=HIGH_LOSS_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+@torch.no_grad()
+def transcribe_highest_training_losses(
+    candidates: list[dict[str, Any]],
+    rows_by_audio_path: dict[str, dict[str, str]],
+    model,
+    n_mels: int,
+    language: str,
+    device: torch.device,
+) -> list[dict[str, str]]:
+    """Decode each unique selected clip once using the final trained model."""
+    predictions: dict[str, str] = {}
+    unique_paths = list(dict.fromkeys(item["audio_path"] for item in candidates))
+    model.eval()
+    for audio_path in tqdm(unique_paths, desc="Highest-loss transcripts"):
+        audio = whisper.pad_or_trim(whisper.load_audio(audio_path))
+        mel = whisper.log_mel_spectrogram(audio, n_mels=n_mels)
+        predictions[audio_path] = decode_with_token_language(
+            model, mel, language=language
+        ).text
+    model.train()
+    release_evaluation_memory(device)
+    output = []
+    for item in sorted(
+        candidates, key=lambda value: (int(value["epoch"]), -float(value["loss"]))
+    ):
+        audio_path = str(item["audio_path"])
+        output.append({
+            "audio_path": audio_path,
+            "epoch": str(item["epoch"]),
+            "loss": f"{float(item['loss']):.10f}",
+            "predicted_transcript": predictions[audio_path],
+            "actual_transcript": rows_by_audio_path[audio_path]["transcript"],
+        })
+    return output
 
 
 def upsert_run_results(
@@ -622,7 +756,13 @@ def upsert_run_results(
         writer.writerow(record)
 
 
-def write_evaluation_html(path: Path, rows: list[dict[str, str]], run_name: str, best_eval_loss: float) -> None:
+def write_evaluation_html(
+    path: Path,
+    rows: list[dict[str, str]],
+    run_name: str,
+    best_eval_loss: float,
+    highest_training_losses: list[dict[str, str]],
+) -> None:
     """Write a static local review page; no HTTP server or CSV fetch is required."""
     path.parent.mkdir(parents=True, exist_ok=True)
     page_rows = []
@@ -654,20 +794,50 @@ def write_evaluation_html(path: Path, rows: list[dict[str, str]], run_name: str,
             "prediction_diff": " ".join(prediction_diff),
         })
     payload = json.dumps(page_rows, ensure_ascii=False).replace("</", "<\\/")
+    training_page_rows = [
+        {
+            **row,
+            "audio_src": os.path.relpath(
+                Path(row["audio_path"]).resolve(), path.parent.resolve()
+            ).replace(os.sep, "/"),
+        }
+        for row in highest_training_losses
+    ]
+    training_payload = json.dumps(
+        training_page_rows, ensure_ascii=False
+    ).replace("</", "<\\/")
     template = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Training evaluation — __RUN_NAME__</title>
 <style>
 body{margin:0;background:#10151f;color:#e9edf3;font:16px system-ui,-apple-system,sans-serif}.wrap{max-width:980px;margin:0 auto;padding:28px}
 h1{margin:0 0 6px}.sub{color:#aebbd0;margin:0 0 20px}.controls{display:flex;gap:10px;align-items:center;margin:18px 0}.controls button{padding:8px 12px}.controls input{flex:1}
-.card{background:#182131;border:1px solid #2d3c55;border-radius:10px;padding:20px}.label{display:block;color:#aebbd0;font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin:18px 0 5px}
+.card{background:#182131;border:1px solid #2d3c55;border-radius:10px;padding:20px;margin-bottom:28px}.label{display:block;color:#aebbd0;font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin:18px 0 5px}
 .text{white-space:pre-wrap;line-height:1.55}.diff span{display:inline-block;padding:1px 3px;margin:1px;border-radius:3px}.correct{color:#c9d4e5}.substitution{background:#71313b;color:#fff}.deletion{background:#71313b;color:#fff;text-decoration:line-through}.insertion{background:#24577a;color:#fff}.legend{color:#aebbd0;font-size:.85rem}.labels{white-space:pre-wrap;overflow:auto;background:#0d131e;padding:12px;border-radius:6px;font:12px ui-monospace,monospace}audio{width:100%;margin-top:8px}
 </style></head><body><main class="wrap"><h1>Held-out training evaluation</h1><p class="sub">Run: __RUN_NAME__ · Evaluation loss: __BEST_LOSS__ · <span id="count"></span></p>
 <div class="controls"><label>Sort <select id="sort"><option value="original">Original order</option><option value="wer-desc">WER: highest first</option><option value="wer-asc">WER: lowest first</option><option value="loss-desc">Loss: highest first</option><option value="loss-asc">Loss: lowest first</option><option value="language_id_loss-desc">Language-ID loss: highest first</option><option value="language_id_loss-asc">Language-ID loss: lowest first</option><option value="token_loss-desc">Token loss: highest first</option><option value="token_loss-asc">Token loss: lowest first</option></select></label><button id="previous">← Previous</button><input id="position" type="range" min="0" value="0"><button id="next">Next →</button></div>
 <section class="card"><strong id="title"></strong><audio id="audio" controls preload="metadata"></audio><span class="label">Clip metrics</span><div class="text" id="metrics"></div><span class="label">Scored word differences</span><div class="legend">Red = substitution/deletion · Blue = insertion</div><div class="text diff" id="referenceDiff"></div><div class="text diff" id="predictionDiff"></div><span class="label">Ground-truth transcript</span><div class="text" id="reference"></div><span class="label">Predicted transcript</span><div class="text" id="prediction"></div><span class="label">Ground-truth language labels</span><div class="labels" id="labels"></div><span class="label">Predicted language labels</span><div class="labels" id="predictedLabels"></div></section>
 </main><script>let rows=__DATA__;const originalRows=rows.slice();let current=0;const $=id=>document.getElementById(id);const format=value=>Number.isFinite(Number(value))?Number(value).toFixed(4):'not available';function show(){const r=rows[current];$('position').value=current;$('title').textContent=`Clip ${current+1} of ${rows.length}: ${r.audio_file_path}`;$('audio').src=r.audio_src;$('metrics').textContent=`WER: ${format(r.wer)} · Word errors: ${r.word_errors}/${r.reference_words} · Loss: ${format(r.loss)} · Token loss: ${format(r.token_loss)}`;$('referenceDiff').innerHTML=`Reference: ${r.reference_diff}`;$('predictionDiff').innerHTML=`Prediction: ${r.prediction_diff}`;$('reference').textContent=r.ground_truth_transcript;$('prediction').textContent=r.predicted_transcript;$('labels').textContent=r.language_labels;$('predictedLabels').textContent=r.predicted_language_labels}function sortRows(){const [field,direction]=$('sort').value.split('-');rows=originalRows.slice();current=0;if(field!=='original'){const multiplier=direction==='desc'?-1:1;rows.sort((a,b)=>multiplier*((Number(a[field])||0)-(Number(b[field])||0)))}show()}$('position').max=Math.max(rows.length-1,0);$('count').textContent=`${rows.length} clips`;$('previous').onclick=()=>{current=(current+rows.length-1)%rows.length;show()};$('next').onclick=()=>{current=(current+1)%rows.length;show()};$('position').oninput=e=>{current=Number(e.target.value);show()};$('sort').onchange=sortRows;if(rows.length)show();</script></body></html>"""
+    training_section = """
+<h2>Highest training losses</h2><p class="sub">The 20 highest-loss examples retained independently for every epoch.</p>
+<div class="controls"><label>Epoch <select id="lossEpoch"></select></label><button id="lossPrevious">← Previous</button><input id="lossPosition" type="range" min="0" value="0"><button id="lossNext">Next →</button></div>
+<section class="card"><strong id="lossTitle"></strong><audio id="lossAudio" controls preload="metadata"></audio><span class="label">Training loss</span><div class="text" id="trainingLoss"></div><span class="label">Actual transcript</span><div class="text" id="lossActual"></div><span class="label">Final-model predicted transcript</span><div class="text" id="lossPredicted"></div></section>
+"""
+    training_script = """
+const trainingRows=__TRAINING_DATA__;let lossRows=[],lossCurrent=0;
+const epochs=[...new Set(trainingRows.map(row=>row.epoch))].sort((a,b)=>Number(a)-Number(b));
+$('lossEpoch').innerHTML=epochs.map(epoch=>`<option value="${epoch}">Epoch ${epoch}</option>`).join('');
+function selectLossEpoch(){lossRows=trainingRows.filter(row=>row.epoch===$('lossEpoch').value);lossCurrent=0;$('lossPosition').max=Math.max(lossRows.length-1,0);showLoss()}
+function showLoss(){if(!lossRows.length){$('lossTitle').textContent='No training-loss examples available';return}const row=lossRows[lossCurrent];$('lossPosition').value=lossCurrent;$('lossTitle').textContent=`Example ${lossCurrent+1} of ${lossRows.length}: ${row.audio_path}`;$('lossAudio').src=row.audio_src;$('trainingLoss').textContent=`Epoch ${row.epoch} · Loss: ${format(row.loss)}`;$('lossActual').textContent=row.actual_transcript;$('lossPredicted').textContent=row.predicted_transcript}
+$('lossEpoch').onchange=selectLossEpoch;$('lossPrevious').onclick=()=>{lossCurrent=(lossCurrent+lossRows.length-1)%lossRows.length;showLoss()};$('lossNext').onclick=()=>{lossCurrent=(lossCurrent+1)%lossRows.length;showLoss()};$('lossPosition').oninput=event=>{lossCurrent=Number(event.target.value);showLoss()};if(epochs.length)selectLossEpoch();else showLoss();
+"""
+    template = template.replace("</main><script>", training_section + "</main><script>")
+    template = template.replace(
+        "</script></body></html>", training_script + "</script></body></html>"
+    )
     path.write_text(
         template.replace("__DATA__", payload)
+        .replace("__TRAINING_DATA__", training_payload)
         .replace("__RUN_NAME__", run_name)
         .replace("__BEST_LOSS__", f"{best_eval_loss:.5f}"),
         encoding="utf-8",
@@ -703,6 +873,23 @@ def main() -> None:
     parser.add_argument(
         "--eval-jember-clips", type=int, default=0,
         help="Hold out exactly this many Jember clips.",
+    )
+    parser.add_argument(
+        "--eval-indonesian-dev-speakers",
+        default="",
+        help=(
+            "Comma-separated Indonesian-development speaker IDs whose complete "
+            "clean datasets are held out for evaluation."
+        ),
+    )
+    parser.add_argument(
+        "--eval-other-indonesian-dev-clips-per-speaker",
+        type=int,
+        default=0,
+        help=(
+            "Also hold out this many clean clips from every other "
+            "Indonesian-development speaker."
+        ),
     )
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
@@ -748,6 +935,21 @@ def main() -> None:
         parser.error("--eos-loss-weight must be positive")
     if args.eval_indonesian_dev_clips < 0 or args.eval_jember_clips < 0:
         parser.error("Balanced evaluation clip counts cannot be negative")
+    if args.eval_other_indonesian_dev_clips_per_speaker < 0:
+        parser.error("--eval-other-indonesian-dev-clips-per-speaker cannot be negative")
+    fully_held_out_dev_speakers = {
+        speaker.strip()
+        for speaker in args.eval_indonesian_dev_speakers.split(",")
+        if speaker.strip()
+    }
+    speaker_evaluation_requested = bool(fully_held_out_dev_speakers)
+    if speaker_evaluation_requested != bool(
+        args.eval_other_indonesian_dev_clips_per_speaker
+    ):
+        parser.error(
+            "Use --eval-indonesian-dev-speakers and "
+            "--eval-other-indonesian-dev-clips-per-speaker together"
+        )
     if bool(args.eval_indonesian_dev_clips) != bool(args.eval_jember_clips):
         parser.error(
             "Use --eval-indonesian-dev-clips and --eval-jember-clips together"
@@ -755,6 +957,13 @@ def main() -> None:
     if args.jember_001_first_ten and args.eval_indonesian_dev_clips:
         parser.error(
             "--jember-001-first-ten cannot be combined with the balanced evaluation split"
+        )
+    if speaker_evaluation_requested and (
+        args.jember_001_first_ten or args.eval_indonesian_dev_clips
+    ):
+        parser.error(
+            "The Indonesian-development speaker evaluation cannot be combined "
+            "with another explicit evaluation split"
         )
     if not 0 < TRAIN_FRACTION < 1:
         raise RuntimeError("TRAIN_FRACTION must be between zero and one")
@@ -784,6 +993,19 @@ def main() -> None:
             f"balanced clips ({args.eval_indonesian_dev_clips} Indonesian-development, "
             f"{args.eval_jember_clips} Jember)"
         )
+    elif speaker_evaluation_requested:
+        train_rows, test_rows = split_indonesian_development_speaker_evaluation(
+            rows,
+            fully_held_out_dev_speakers,
+            args.eval_other_indonesian_dev_clips_per_speaker,
+            args.seed,
+        )
+        split_unit = (
+            "Indonesian-development speakers "
+            f"{','.join(sorted(fully_held_out_dev_speakers))} fully held out, plus "
+            f"{args.eval_other_indonesian_dev_clips_per_speaker} clips from every "
+            "other development speaker"
+        )
     elif args.max_samples is not None:
         rng = random.Random(args.seed)
         rng.shuffle(rows)
@@ -793,7 +1015,13 @@ def main() -> None:
         train_rows, test_rows, split_unit = split_rows(rows, args.seed)
     if not train_rows or not test_rows:
         raise RuntimeError("The split produced an empty train or test partition")
-    eval_rows = test_rows[: min(args.eval_set_size, len(test_rows))]
+    # A speaker-defined evaluation set is exact: do not silently truncate the
+    # complete speaker 5/7 holdouts via the generic --eval-set-size cap.
+    eval_rows = (
+        test_rows
+        if speaker_evaluation_requested
+        else test_rows[: min(args.eval_set_size, len(test_rows))]
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_manifest(args.output_dir / "train_split.csv", train_rows)
     write_manifest(args.output_dir / "test_split.csv", test_rows)
@@ -888,6 +1116,17 @@ def main() -> None:
     latest_eval_loss = float("inf")
     latest_eval_rows: list[dict[str, str]] = []
     run_label = str(run.name or args.wandb_run_name or "local")
+    completed_high_losses: list[dict[str, Any]] = (
+        list(resume_progress.get("completed_high_losses", []))
+        if resume_exact else []
+    )
+    current_loss_heap: list[tuple[float, str]] = (
+        [
+            (float(loss), str(audio_path))
+            for loss, audio_path in resume_progress.get("current_loss_heap", [])
+        ]
+        if resume_exact else []
+    )
 
     start_epoch = 1
     resume_batch_in_epoch = 0
@@ -917,6 +1156,18 @@ def main() -> None:
                 "weight-only resume instead."
             )
         if completed_batches >= saved_batches:
+            if current_loss_heap:
+                completed_high_losses.extend(
+                    {
+                        "audio_path": audio_path,
+                        "epoch": saved_epoch,
+                        "loss": loss_value,
+                    }
+                    for loss_value, audio_path in sorted(
+                        current_loss_heap, reverse=True
+                    )
+                )
+                current_loss_heap = []
             start_epoch = saved_epoch + 1
         else:
             start_epoch = saved_epoch
@@ -969,6 +1220,8 @@ def main() -> None:
                 batch_size=args.batch_size,
                 seed=args.seed,
                 training_clips=len(train_dataset),
+                current_loss_heap=current_loss_heap,
+                completed_high_losses=completed_high_losses,
             )
             best_csv_path = args.output_dir / "best_eval_predictions.csv"
             write_evaluation_csv(best_csv_path, best_eval_rows)
@@ -996,6 +1249,8 @@ def main() -> None:
                 batch_size=args.batch_size,
                 seed=args.seed,
                 training_clips=len(train_dataset),
+                current_loss_heap=current_loss_heap,
+                completed_high_losses=completed_high_losses,
             )
             write_evaluation_csv(best_wer_csv_path, best_wer_rows)
         wandb.log(metrics, step=step)
@@ -1016,6 +1271,12 @@ def main() -> None:
         current_batches_per_epoch = len(make_train_loader(current_epoch))
         for epoch in range(start_epoch, args.epochs + 1):
             current_epoch = epoch
+            if not (
+                resume_exact
+                and epoch == start_epoch
+                and resume_batch_in_epoch > 0
+            ):
+                current_loss_heap = []
             model.train()
             train_loader = make_train_loader(epoch)
             current_batches_per_epoch = len(train_loader)
@@ -1034,13 +1295,28 @@ def main() -> None:
                 optimizer.zero_grad(set_to_none=True)
                 autocast = torch.autocast(device_type="cuda", dtype=torch.float16) if device.type == "cuda" else contextlib.nullcontext()
                 with autocast:
-                    asr_loss, lid_loss, loss, correct, lid_count = model_losses(
+                    (
+                        asr_loss,
+                        lid_loss,
+                        loss,
+                        correct,
+                        lid_count,
+                        per_example_losses,
+                    ) = model_losses(
                         model,
                         batch,
                         device,
                         tokenizer.eot,
                         args.eos_loss_weight,
                     )
+                for row, example_loss in zip(
+                    batch["rows"], per_example_losses.detach().cpu().tolist()
+                ):
+                    candidate = (float(example_loss), row["audio_path"])
+                    if len(current_loss_heap) < HIGHEST_TRAINING_LOSSES:
+                        heapq.heappush(current_loss_heap, candidate)
+                    elif candidate > current_loss_heap[0]:
+                        heapq.heapreplace(current_loss_heap, candidate)
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -1066,6 +1342,18 @@ def main() -> None:
                     reached_step_limit = True
                     break
             save_token_lid_lora_adapter(model, args.output_dir / "last_lora")
+            if current_batch >= current_batches_per_epoch:
+                completed_high_losses.extend(
+                    {
+                        "audio_path": audio_path,
+                        "epoch": epoch,
+                        "loss": loss_value,
+                    }
+                    for loss_value, audio_path in sorted(
+                        current_loss_heap, reverse=True
+                    )
+                )
+                current_loss_heap = []
             if reached_step_limit:
                 break
 
@@ -1078,15 +1366,44 @@ def main() -> None:
             )
         if not best_eval_rows:
             raise RuntimeError("No held-out evaluation rows were produced")
+        high_loss_candidates = completed_high_losses + [
+            {
+                "audio_path": audio_path,
+                "epoch": current_epoch,
+                "loss": loss_value,
+            }
+            for loss_value, audio_path in sorted(current_loss_heap, reverse=True)
+        ]
+        rows_by_audio_path = {row["audio_path"]: row for row in train_rows}
+        highest_training_losses = transcribe_highest_training_losses(
+            high_loss_candidates,
+            rows_by_audio_path,
+            model,
+            model.dims.n_mels,
+            args.language,
+            device,
+        )
+        highest_losses_csv = args.output_dir / "highest_training_losses.csv"
+        write_highest_training_losses(
+            highest_losses_csv, highest_training_losses
+        )
+        print(f"Wrote highest training losses to {highest_losses_csv}")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_run_label = re.sub(r"[^A-Za-z0-9_-]+", "_", run_label)
         html_path = args.analysis_dir / f"{timestamp}_run_{safe_run_label}.html"
-        write_evaluation_html(html_path, latest_eval_rows, run_label, latest_eval_loss)
+        write_evaluation_html(
+            html_path,
+            latest_eval_rows,
+            run_label,
+            latest_eval_loss,
+            highest_training_losses,
+        )
         run.summary["best_eval_loss"] = best_eval_loss
         run.summary["best_eval_wer"] = best_eval_wer
         run.summary["best_lora_adapter"] = str(args.output_dir / "best_lora")
         run.summary["best_wer_adapter"] = str(args.output_dir / "best_wer")
         run.summary["evaluation_csv"] = str(args.output_dir / "eval_predictions.csv")
+        run.summary["highest_training_losses_csv"] = str(highest_losses_csv)
         run.summary["evaluation_html"] = str(html_path)
         print(f"Wrote final held-out evaluation review to {html_path}")
         try:

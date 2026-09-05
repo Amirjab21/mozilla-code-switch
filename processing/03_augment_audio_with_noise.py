@@ -52,6 +52,17 @@ def find_noise_files(noise_dir: Path) -> list[Path]:
     return files
 
 
+def select_rows_for_augmentation(
+    rows: list[dict[str, str]], fraction: float, seed: int
+) -> list[dict[str, str]]:
+    """Select an exact, deterministic fraction while preserving manifest order."""
+    if fraction >= 1:
+        return rows[:]
+    count = int(len(rows) * fraction + 0.5)
+    selected_indices = set(random.Random(seed).sample(range(len(rows)), count))
+    return [row for index, row in enumerate(rows) if index in selected_indices]
+
+
 def random_noise_region(
     clean: np.ndarray,
     noise: np.ndarray,
@@ -162,6 +173,12 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path("processed_indonesia/03_augmented_audio"))
     parser.add_argument("--noise-dir", type=Path, default=Path("indonesian_data/room_noises"))
     parser.add_argument("--copies-per-clip", type=int, default=1)
+    parser.add_argument(
+        "--augmentation-fraction",
+        type=float,
+        default=1.0,
+        help="Fraction of eligible clean rows that receive augmented copies.",
+    )
     parser.add_argument("--min-noise-fraction", type=float, default=0.25)
     parser.add_argument("--max-noise-fraction", type=float, default=0.75)
     parser.add_argument("--min-snr-db", type=float, default=5.0)
@@ -177,6 +194,8 @@ def main() -> None:
         parser.error(f"Noise directory not found: {args.noise_dir}")
     if args.copies_per_clip < 1:
         parser.error("--copies-per-clip must be at least 1")
+    if not 0 <= args.augmentation_fraction <= 1:
+        parser.error("--augmentation-fraction must be between 0 and 1")
     if not 0 < args.min_noise_fraction <= args.max_noise_fraction <= 1:
         parser.error("Noise fractions must satisfy 0 < min <= max <= 1")
     if args.min_snr_db > args.max_snr_db:
@@ -196,7 +215,10 @@ def main() -> None:
     rng = random.Random(args.seed)
     clean_rows: list[dict[str, str]] = []
     augmented_rows: list[dict[str, str]] = []
-    rows_to_augment = rows if args.limit is None else rows[: args.limit]
+    eligible_rows = rows if args.limit is None else rows[: args.limit]
+    rows_to_augment = select_rows_for_augmentation(
+        eligible_rows, args.augmentation_fraction, args.seed
+    )
     for row in rows:
         clean = dict(row)
         clean.update({
@@ -226,7 +248,8 @@ def main() -> None:
         writer.writerows(augmented_rows)
     print(
         f"Wrote {len(clean_rows)} clean + {len(augmented_rows)} augmented rows "
-        f"to {args.output} using {len(noise_files)} noise files"
+        f"to {args.output} using {len(noise_files)} noise files "
+        f"({args.augmentation_fraction:.1%} augmentation selection)"
     )
     link = viewer_url(args.output)
     if link:

@@ -95,6 +95,10 @@ def main() -> None:
         "--max-clips", type=int, help="Deprecated final combined cap."
     )
     parser.add_argument("--min-words", type=int, default=2)
+    parser.add_argument(
+        "--prepare-workers", type=int, default=1,
+        help="Number of Jember recordings prepared concurrently in stage 1.",
+    )
     parser.add_argument("--reuse-existing", action="store_true")
 
     # Stage 2: Wav2Vec2 matching of Jember transcript starts.
@@ -122,6 +126,12 @@ def main() -> None:
         "--noise-dir", type=Path, default=Path("indonesian_data/room_noises")
     )
     parser.add_argument("--noise-copies-per-clip", type=int, default=1)
+    parser.add_argument(
+        "--noise-augmentation-fraction",
+        type=float,
+        default=1.0,
+        help="Fraction of stage-2 rows that receive additive-noise copies.",
+    )
     parser.add_argument("--min-noise-fraction", type=float, default=0.25)
     parser.add_argument("--max-noise-fraction", type=float, default=0.75)
     parser.add_argument("--min-snr-db", type=float, default=5.0)
@@ -181,6 +191,7 @@ def main() -> None:
         "--min-clip-seconds", str(args.min_clip_seconds),
         "--max-clip-seconds", str(args.max_clip_seconds),
         "--min-words", str(args.min_words),
+        "--prepare-workers", str(args.prepare_workers),
     ]
     optional_stage_1_args = (
         ("--max-recordings", args.max_recordings),
@@ -221,6 +232,7 @@ def main() -> None:
         "--output-dir", str(augmented_audio_dir),
         "--noise-dir", str(args.noise_dir),
         "--copies-per-clip", str(args.noise_copies_per_clip),
+        "--augmentation-fraction", str(args.noise_augmentation_fraction),
         "--min-noise-fraction", str(args.min_noise_fraction),
         "--max-noise-fraction", str(args.max_noise_fraction),
         "--min-snr-db", str(args.min_snr_db),

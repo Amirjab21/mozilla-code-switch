@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Create overlapping Jember row windows and transcode development clips.
+"""Create blockwise expanding Jember windows and transcode development clips.
 
-Every output is mono 16 kHz PCM WAV. For each Jember recording, stage 1 emits
-every contiguous TSV row window whose duration is within the configured range
-and whose combined transcript contains enough words. Windows intentionally
-overlap: after exhausting the valid extensions from one starting row, the
-start advances by one row and enumeration begins again.
+Every output is mono 16 kHz PCM WAV. From each selected Jember starting row,
+stage 1 emits every valid expanding prefix until another row would exceed the
+maximum duration. The next block begins at the second-to-last row of that
+longest prefix, retaining boundary overlap without restarting at every row.
 """
 
 from __future__ import annotations
@@ -16,8 +15,11 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
+import wave
 from collections import Counter
-from dataclasses import dataclass
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterator
 from urllib.parse import quote
@@ -64,6 +66,21 @@ class JemberWindow:
     transcript: str
 
 
+@dataclass(frozen=True)
+class JemberRecordingJob:
+    recording_id: str
+    source: Path
+    raw_rows: list[dict[str, str]]
+    output_dir: Path
+    ffmpeg: str
+    ffprobe: str
+    minimum_ms: int
+    maximum_ms: int
+    minimum_words: int
+    reuse_existing: bool
+    clip_limit: int | None = None
+
+
 def parse_timestamp(value: str) -> int:
     hours, minutes, seconds = value.strip().split(":")
     return round((int(hours) * 3600 + int(minutes) * 60 + float(seconds)) * 1000)
@@ -103,6 +120,115 @@ def duration_ms(ffprobe: str, source: Path) -> int:
         text=True,
     )
     return round(float(result.stdout.strip()) * 1000)
+
+
+def decode_jember_source(ffmpeg: str, source: Path, destination: Path) -> None:
+    """Decode one complete Jember MP3 to canonical PCM exactly once."""
+    subprocess.run(
+        [
+            ffmpeg, "-y", "-v", "error", "-i", str(source),
+            "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(destination),
+        ],
+        check=True,
+    )
+
+
+def write_jember_pcm_windows(
+    decoded_source: Path,
+    outputs: list[tuple[JemberWindow, Path]],
+) -> None:
+    """Read decoded PCM once and write all requested timestamp slices."""
+    with wave.open(str(decoded_source), "rb") as reader:
+        channels = reader.getnchannels()
+        sample_width = reader.getsampwidth()
+        sample_rate = reader.getframerate()
+        compression = reader.getcomptype()
+        frame_count = reader.getnframes()
+        pcm = reader.readframes(frame_count)
+    if (channels, sample_width, sample_rate, compression) != (1, 2, 16_000, "NONE"):
+        raise ValueError(
+            f"Unexpected decoded Jember format in {decoded_source}: "
+            f"channels={channels}, sample_width={sample_width}, "
+            f"sample_rate={sample_rate}, compression={compression}"
+        )
+    frame_width = channels * sample_width
+    for window, destination in outputs:
+        start_frame = min(frame_count, round(window.start_ms * sample_rate / 1000))
+        end_frame = min(frame_count, round(window.end_ms * sample_rate / 1000))
+        if end_frame <= start_frame:
+            raise ValueError(
+                f"Invalid PCM slice for {destination}: {start_frame}:{end_frame}"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(destination), "wb") as writer:
+            writer.setnchannels(channels)
+            writer.setsampwidth(sample_width)
+            writer.setframerate(sample_rate)
+            writer.setcomptype(compression, "not compressed")
+            writer.writeframes(pcm[start_frame * frame_width : end_frame * frame_width])
+
+
+def prepare_jember_recording(
+    job: JemberRecordingJob,
+) -> tuple[str, int, list[dict[str, str]]]:
+    """Prepare one recording, decoding its compressed audio at most once."""
+    parsed_rows = parse_jember_rows(
+        job.raw_rows, duration_ms(job.ffprobe, job.source)
+    )
+    windows = list(
+        enumerate_jember_windows(
+            parsed_rows, job.minimum_ms, job.maximum_ms, job.minimum_words
+        )
+    )
+    if job.clip_limit is not None:
+        windows = windows[: job.clip_limit]
+
+    output_pairs = [
+        (
+            window,
+            job.output_dir
+            / (
+                f"jember_{int(job.recording_id):03d}_"
+                f"{window.first_row:04d}-{window.last_row:04d}.wav"
+            ),
+        )
+        for window in windows
+    ]
+    missing_outputs = [
+        pair
+        for pair in output_pairs
+        if not (job.reuse_existing and pair[1].is_file())
+    ]
+    if missing_outputs:
+        # Keep the temporary PCM on the same filesystem as the outputs. Each
+        # worker owns its directory, and it is removed after all slices finish.
+        with tempfile.TemporaryDirectory(
+            prefix=f".jember_{job.recording_id}_", dir=job.output_dir
+        ) as temporary_directory:
+            decoded_source = Path(temporary_directory) / "source_16khz.wav"
+            decode_jember_source(job.ffmpeg, job.source, decoded_source)
+            write_jember_pcm_windows(decoded_source, missing_outputs)
+
+    records = []
+    for window, output in output_pairs:
+        utterance_ids = [
+            f"jember:{job.recording_id}:{number}"
+            for number in window.row_numbers
+        ]
+        records.append(
+            make_row(
+                output,
+                window.transcript,
+                job.source,
+                window.start_ms,
+                window.end_ms,
+                "unknown",
+                utterance_ids,
+                "jember",
+                "tsv_row_window",
+            )
+        )
+    return job.recording_id, len(parsed_rows), records
 
 
 def make_row(
@@ -159,10 +285,14 @@ def enumerate_jember_windows(
     maximum_ms: int,
     minimum_words: int,
 ) -> Iterator[JemberWindow]:
-    """Yield every valid contiguous row window in start-row breadth order."""
-    for first_index, first in enumerate(source_rows):
+    """Yield expanding prefixes, then stride with a two-row block overlap."""
+    first_index = 0
+    while first_index < len(source_rows):
+        first = source_rows[first_index]
         transcript_parts: list[str] = []
         word_count = 0
+        longest_valid_index: int | None = None
+        reached_recording_end = False
         for last_index in range(first_index, len(source_rows)):
             last = source_rows[last_index]
             text = last.source.get("text", "").strip()
@@ -172,8 +302,10 @@ def enumerate_jember_windows(
             duration = last.end_ms - first.start_ms
             if duration > maximum_ms:
                 break
+            reached_recording_end = last_index == len(source_rows) - 1
             if duration < minimum_ms or word_count < minimum_words or duration <= 0:
                 continue
+            longest_valid_index = last_index
             yield JemberWindow(
                 first_row=first.number,
                 last_row=last.number,
@@ -184,6 +316,19 @@ def enumerate_jember_windows(
                 end_ms=last.end_ms,
                 transcript=" ".join(transcript_parts),
             )
+
+        # Once a block has expanded through the final row, every remaining
+        # suffix would only duplicate audio already present in this tail block.
+        if reached_recording_end:
+            break
+        if longest_valid_index is None:
+            # A malformed/overlong starting row must never stall enumeration.
+            first_index += 1
+            continue
+        # If the longest emitted prefix was [start, ..., end], start the next
+        # block at end - 1: the second-to-last included TSV row. Very short
+        # blocks fall back to advancing one row to guarantee forward progress.
+        first_index = max(first_index + 1, longest_valid_index - 1)
 
 
 def prepare_jember(
@@ -205,10 +350,8 @@ def prepare_jember(
 
     minimum_ms = round(args.min_clip_seconds * 1000)
     maximum_ms = round(args.max_clip_seconds * 1000)
-    emitted = 0
+    jobs: list[JemberRecordingJob] = []
     for recording_id in recording_ids:
-        if limit is not None and emitted >= limit:
-            break
         source = args.jember_audio_dir / f"{recording_id}.mp3"
         if not source.exists():
             print(f"Skipping missing Jember audio: {source}")
@@ -216,47 +359,52 @@ def prepare_jember(
         selected_rows = by_recording[recording_id]
         if args.max_segments_per_recording is not None:
             selected_rows = selected_rows[:args.max_segments_per_recording]
-        parsed_rows = parse_jember_rows(
-            selected_rows, duration_ms(args.ffprobe, source)
-        )
-        recording_count = 0
-        for window in enumerate_jember_windows(
-            parsed_rows, minimum_ms, maximum_ms, args.min_words
-        ):
-            if limit is not None and emitted >= limit:
-                break
-            output = args.output_dir / (
-                f"jember_{int(recording_id):03d}_"
-                f"{window.first_row:04d}-{window.last_row:04d}.wav"
+        jobs.append(
+            JemberRecordingJob(
+                recording_id=recording_id,
+                source=source,
+                raw_rows=selected_rows,
+                output_dir=args.output_dir,
+                ffmpeg=args.ffmpeg,
+                ffprobe=args.ffprobe,
+                minimum_ms=minimum_ms,
+                maximum_ms=maximum_ms,
+                minimum_words=args.min_words,
+                reuse_existing=args.reuse_existing,
             )
-            if not (args.reuse_existing and output.is_file()):
-                transcode(
-                    args.ffmpeg,
-                    source,
-                    output,
-                    start_ms=window.start_ms,
-                    end_ms=window.end_ms,
-                )
-            utterance_ids = [
-                f"jember:{recording_id}:{number}"
-                for number in window.row_numbers
-            ]
-            output_rows.append(make_row(
-                output,
-                window.transcript,
-                source,
-                window.start_ms,
-                window.end_ms,
-                "unknown",
-                utterance_ids,
-                "jember",
-                "tsv_row_window",
-            ))
-            emitted += 1
-            recording_count += 1
+        )
+
+    if not jobs:
+        return
+    if limit is not None:
+        if args.prepare_workers > 1:
+            print(
+                "A global Jember clip limit is active; using one preparation "
+                "worker so the limit remains deterministic."
+            )
+        emitted = 0
+        results = []
+        for job in jobs:
+            remaining = limit - emitted
+            if remaining <= 0:
+                break
+            limited_job = replace(job, clip_limit=remaining)
+            result = prepare_jember_recording(limited_job)
+            results.append(result)
+            emitted += len(result[2])
+    elif args.prepare_workers == 1:
+        results = [prepare_jember_recording(job) for job in jobs]
+    else:
+        worker_count = min(args.prepare_workers, len(jobs))
+        print(f"Preparing {len(jobs)} Jember recordings with {worker_count} workers")
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            results = list(executor.map(prepare_jember_recording, jobs))
+
+    for recording_id, parsed_count, recording_rows in results:
+        output_rows.extend(recording_rows)
         print(
             f"Prepared Jember recording {recording_id}: "
-            f"{len(parsed_rows)} TSV rows -> {recording_count} overlapping clips"
+            f"{parsed_count} TSV rows -> {len(recording_rows)} overlapping clips"
         )
 
 
@@ -373,6 +521,12 @@ def main() -> None:
     parser.add_argument("--min-clip-seconds", type=float, default=3.0)
     parser.add_argument("--max-clip-seconds", type=float, default=30.0)
     parser.add_argument("--min-words", type=int, default=2)
+    parser.add_argument(
+        "--prepare-workers",
+        type=int,
+        default=1,
+        help="Number of Jember recordings to decode and slice concurrently.",
+    )
     parser.add_argument("--reuse-existing", action="store_true")
     parser.add_argument("--ffmpeg", default="ffmpeg")
     parser.add_argument("--ffprobe", default="ffprobe")
@@ -397,6 +551,8 @@ def main() -> None:
         parser.error("--max-clip-seconds must be greater than --min-clip-seconds > 0")
     if args.min_words < 1:
         parser.error("--min-words must be at least 1")
+    if args.prepare_workers < 1:
+        parser.error("--prepare-workers must be at least 1")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.manifest.parent.mkdir(parents=True, exist_ok=True)
