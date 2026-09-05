@@ -1,0 +1,24 @@
+# Train Whisper Small on the existing window-preview dataset with both room-noise
+# and speed/pitch augmentation. Stages 01-03.1 are intentionally reused.
+run_name: window_preview_noise_speed_pitch_whisper_small
+
+train:
+  manifest: processed_indonesia/window_preview_noise/03_1_speed_pertub_added.csv
+  output_dir: processed_indonesia/window_preview_noise/05_whisper_small_speed_pitch
+  base_model: small
+  language: id
+  epochs: 20
+  batch_size: 4
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.0
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  eval_indonesian_dev_clips: 10
+  eval_jember_clips: 10
+  eval_set_size: 20
+  eval_every_steps: 100
+  device: mps
+  wandb_project: indonesian-whisper-small-lora
+  wandb_run_name: whisper-small-speed-pitch-noise
+  wandb_mode: online

@@ -106,3 +106,32 @@ def save_token_lid_lora_adapter(model: Any, path: Path | str) -> None:
     (path / "whisper_token_lid_metadata.json").write_text(
         json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
     )
+
+
+def load_token_lid_lora_adapter(
+    path: Path | str,
+    *,
+    device: Optional[str | torch.device] = None,
+    download_root: Optional[str] = None,
+):
+    """Reload a saved local Whisper LoRA adapter for continued training."""
+    path = Path(path)
+    metadata_path = path / "whisper_token_lid_metadata.json"
+    if not metadata_path.is_file():
+        raise FileNotFoundError(f"Missing LoRA metadata: {metadata_path}")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    try:
+        from peft import PeftModel
+    except ImportError as error:  # pragma: no cover
+        raise ImportError(
+            "PEFT is required for the LoRA model. Run `uv sync --project processing`."
+        ) from error
+    base_model = load_token_lid_model(
+        metadata["base_model"],
+        language_labels=metadata["language_labels"],
+        device=device,
+        download_root=download_root,
+    )
+    model = PeftModel.from_pretrained(base_model, str(path), is_trainable=True)
+    model.to(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    return model

@@ -7,11 +7,13 @@ import argparse
 import contextlib
 import csv
 import difflib
+import gc
 import html
 import json
 import os
 import random
 import re
+import shutil
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
@@ -35,7 +37,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from models.whisper_lid import load_token_lid_lora_model, save_token_lid_lora_adapter
+from models.whisper_lid import (
+    load_token_lid_lora_adapter,
+    load_token_lid_lora_model,
+    save_token_lid_lora_adapter,
+)
 from models.whisper_lid.decode import decode_with_token_language
 from models.whisper_lid.labels import IGNORE_INDEX, make_token_language_targets
 from run_config import apply_defaults, load_section
@@ -50,6 +56,121 @@ EVAL_EVERY_STEPS = 250
 # Keep the auxiliary language-ID head available for diagnostics, but do not use
 # its loss to update the model during the current ASR-only fine-tuning runs.
 LID_LOSS_WEIGHT = 0.0
+
+
+def ask_yes_no(question: str) -> bool:
+    """Ask a strict interactive yes/no question, accepting y/yes and n/no."""
+    while True:
+        answer = input(f"{question} [y/N] ").strip().casefold()
+        if answer in {"y", "yes"}:
+            return True
+        if answer in {"", "n", "no"}:
+            return False
+        print("Please answer Y or N.")
+
+
+def resolve_existing_output(output_dir: Path) -> tuple[bool, bool]:
+    """Return (resume weights, resume exact progress), or safely replace/abort."""
+    if not output_dir.exists():
+        return False, False
+    checkpoint = output_dir / "best_lora"
+    resume = ask_yes_no(
+        f"This folder already exists: {output_dir}. Would you like to continue "
+        "from the checkpoint saved under best_lora?"
+    )
+    if resume:
+        if not checkpoint.is_dir():
+            raise FileNotFoundError(
+                f"Cannot resume because the checkpoint folder does not exist: {checkpoint}"
+            )
+        progress_path = checkpoint / "training_progress.json"
+        exact = False
+        if progress_path.is_file():
+            exact = ask_yes_no(
+                "training_progress.json exists. Continue from the exact saved epoch "
+                "and batch position?"
+            )
+        else:
+            print(
+                "No training_progress.json was found; loading the adapter weights "
+                "and starting with a newly shuffled training order."
+            )
+        return True, exact
+    if ask_yes_no(f"Would you like to overwrite the training folder {output_dir}?"):
+        resolved = output_dir.resolve()
+        if resolved == REPOSITORY_ROOT or REPOSITORY_ROOT not in resolved.parents:
+            raise ValueError(f"Refusing to recursively replace unsafe output directory: {resolved}")
+        shutil.rmtree(resolved)
+        return False, False
+    raise SystemExit("Training cancelled; the existing output folder was left unchanged.")
+
+
+def save_training_progress(
+    checkpoint_dir: Path,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.cuda.amp.GradScaler,
+    *,
+    epoch: int,
+    batch_in_epoch: int,
+    batches_per_epoch: int,
+    global_step: int,
+    configured_epochs: int,
+    best_eval_loss: float,
+    best_eval_wer: float,
+    batch_size: int,
+    seed: int,
+    training_clips: int,
+) -> None:
+    """Persist progress and optimizer state corresponding to saved adapter weights."""
+    progress = {
+        "epoch": epoch,
+        "completed_epochs": epoch if batch_in_epoch >= batches_per_epoch else epoch - 1,
+        "batch_in_epoch": batch_in_epoch,
+        "batches_per_epoch": batches_per_epoch,
+        "epoch_progress": batch_in_epoch / max(batches_per_epoch, 1),
+        "global_step": global_step,
+        "configured_epochs": configured_epochs,
+        "batch_size": batch_size,
+        "seed": seed,
+        "training_clips": training_clips,
+        "best_eval_loss": best_eval_loss,
+        "best_eval_wer": best_eval_wer,
+        "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    (checkpoint_dir / "training_progress.json").write_text(
+        json.dumps(progress, indent=2) + "\n", encoding="utf-8"
+    )
+    torch.save(
+        {
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scaler_state_dict": scaler.state_dict(),
+        },
+        checkpoint_dir / "training_state.pt",
+    )
+
+
+def load_training_progress(
+    checkpoint_dir: Path,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.cuda.amp.GradScaler,
+    device: torch.device,
+) -> dict[str, Any]:
+    progress = json.loads(
+        (checkpoint_dir / "training_progress.json").read_text(encoding="utf-8")
+    )
+    state_path = checkpoint_dir / "training_state.pt"
+    if not state_path.is_file():
+        raise FileNotFoundError(
+            f"Exact resume requires optimizer state, but it is missing: {state_path}"
+        )
+    state = torch.load(state_path, map_location="cpu", weights_only=False)
+    optimizer.load_state_dict(state["optimizer_state_dict"])
+    for optimizer_state in optimizer.state.values():
+        for key, value in optimizer_state.items():
+            if torch.is_tensor(value):
+                optimizer_state[key] = value.to(device)
+    scaler.load_state_dict(state.get("scaler_state_dict", {}))
+    return progress
 
 
 def combined_training_loss(
@@ -70,6 +191,18 @@ def select_device(value: str) -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def release_evaluation_memory(device: torch.device) -> None:
+    """Release accelerator allocations left cached by autoregressive evaluation."""
+    gc.collect()
+    if device.type == "mps":
+        # Finish outstanding kernels before releasing cached unified memory.
+        torch.mps.synchronize()
+        torch.mps.empty_cache()
+    elif device.type == "cuda":
+        torch.cuda.synchronize(device)
+        torch.cuda.empty_cache()
 
 
 def read_rows(manifest: Path) -> list[dict[str, str]]:
@@ -137,6 +270,7 @@ def split_balanced_dataset_evaluation(
     clean_rows = [
         row for row in rows
         if row.get("augmented", "false").casefold() != "true"
+        and row.get("speed_augmented", "false").casefold() != "true"
     ]
     development = [row for row in clean_rows if row.get("dataset") == "indonesian_development"]
     jember = [row for row in clean_rows if row.get("dataset") == "jember"]
@@ -625,6 +759,8 @@ def main() -> None:
     if not 0 < TRAIN_FRACTION < 1:
         raise RuntimeError("TRAIN_FRACTION must be between zero and one")
 
+    resume_adapter, resume_exact = resolve_existing_output(args.output_dir)
+
     load_dotenv(args.env_file)
     if args.wandb_mode == "online" and not os.getenv("WANDB_API_KEY"):
         parser.error(f"WANDB_API_KEY was not found in {args.env_file}; use --wandb-mode offline to test without uploading")
@@ -662,14 +798,22 @@ def main() -> None:
     write_manifest(args.output_dir / "train_split.csv", train_rows)
     write_manifest(args.output_dir / "test_split.csv", test_rows)
 
-    model = load_token_lid_lora_model(
-        args.base_model,
-        rank=args.lora_rank,
-        alpha=args.lora_alpha,
-        dropout=args.lora_dropout,
-        device=device,
-        download_root=str(args.download_root),
-    )
+    if resume_adapter:
+        model = load_token_lid_lora_adapter(
+            args.output_dir / "best_lora",
+            device=device,
+            download_root=str(args.download_root),
+        )
+        print(f"Loaded LoRA adapter from {args.output_dir / 'best_lora'}")
+    else:
+        model = load_token_lid_lora_model(
+            args.base_model,
+            rank=args.lora_rank,
+            alpha=args.lora_alpha,
+            dropout=args.lora_dropout,
+            device=device,
+            download_root=str(args.download_root),
+        )
     tokenizer = get_tokenizer(
         model.is_multilingual,
         num_languages=model.num_languages,
@@ -679,10 +823,31 @@ def main() -> None:
     train_dataset = MiamiDataset(train_rows, tokenizer, model.dims.n_mels)
     eval_dataset = MiamiDataset(eval_rows, tokenizer, model.dims.n_mels)
     collate = lambda items: collate_batch(items, tokenizer)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=collate)
     eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
+
+    def make_train_loader(epoch: int) -> DataLoader:
+        # A per-epoch seed makes the shuffled order reproducible for exact resume.
+        generator = torch.Generator().manual_seed(args.seed + epoch)
+        return DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            generator=generator,
+            num_workers=args.num_workers,
+            collate_fn=collate,
+        )
+
+    resume_progress: dict[str, Any] = {}
+    if resume_adapter:
+        progress_path = args.output_dir / "best_lora" / "training_progress.json"
+        if resume_exact:
+            resume_progress = load_training_progress(
+                args.output_dir / "best_lora", optimizer, scaler, device
+            )
+        elif progress_path.is_file():
+            resume_progress = json.loads(progress_path.read_text(encoding="utf-8"))
 
     run = wandb.init(
         project=args.wandb_project,
@@ -700,17 +865,72 @@ def main() -> None:
             "lid_loss_weight": LID_LOSS_WEIGHT,
         },
     )
-    global_step = 0
+    global_step = int(resume_progress.get("global_step", 0)) if resume_exact else 0
     last_eval_step = -1
     reached_step_limit = False
-    best_eval_loss = float("inf")
+    best_eval_loss = float(resume_progress.get("best_eval_loss", float("inf")))
+    best_wer_progress_path = args.output_dir / "best_wer" / "training_progress.json"
+    if resume_adapter and best_wer_progress_path.is_file():
+        best_wer_progress = json.loads(best_wer_progress_path.read_text(encoding="utf-8"))
+        best_eval_wer = float(best_wer_progress.get("best_eval_wer", float("inf")))
+    else:
+        best_eval_wer = float(resume_progress.get("best_eval_wer", float("inf")))
     best_eval_rows: list[dict[str, str]] = []
+    best_wer_rows: list[dict[str, str]] = []
+    best_csv_path = args.output_dir / "best_eval_predictions.csv"
+    if resume_adapter and best_csv_path.is_file():
+        with best_csv_path.open(encoding="utf-8", newline="") as file:
+            best_eval_rows = list(csv.DictReader(file))
+    best_wer_csv_path = args.output_dir / "best_wer_eval_predictions.csv"
+    if resume_adapter and best_wer_csv_path.is_file():
+        with best_wer_csv_path.open(encoding="utf-8", newline="") as file:
+            best_wer_rows = list(csv.DictReader(file))
     latest_eval_loss = float("inf")
     latest_eval_rows: list[dict[str, str]] = []
     run_label = str(run.name or args.wandb_run_name or "local")
 
-    def run_evaluation(step: int) -> dict[str, float]:
-        nonlocal best_eval_loss, best_eval_rows, latest_eval_loss, latest_eval_rows
+    start_epoch = 1
+    resume_batch_in_epoch = 0
+    if resume_exact:
+        saved_epoch = int(resume_progress["epoch"])
+        completed_batches = int(resume_progress["batch_in_epoch"])
+        saved_batches = int(resume_progress["batches_per_epoch"])
+        expected_values = {
+            "batch_size": args.batch_size,
+            "seed": args.seed,
+            "training_clips": len(train_dataset),
+        }
+        mismatches = [
+            f"{key}: saved={resume_progress.get(key)!r}, current={value!r}"
+            for key, value in expected_values.items()
+            if resume_progress.get(key) != value
+        ]
+        current_batches = len(make_train_loader(saved_epoch))
+        if current_batches != saved_batches:
+            mismatches.append(
+                f"batches_per_epoch: saved={saved_batches}, current={current_batches}"
+            )
+        if mismatches:
+            raise ValueError(
+                "Cannot resume from the exact batch position because the training "
+                "configuration changed (" + "; ".join(mismatches) + "). Choose "
+                "weight-only resume instead."
+            )
+        if completed_batches >= saved_batches:
+            start_epoch = saved_epoch + 1
+        else:
+            start_epoch = saved_epoch
+            resume_batch_in_epoch = completed_batches
+        print(
+            f"Resuming at epoch {start_epoch}/{args.epochs}, after batch "
+            f"{resume_batch_in_epoch}, global step {global_step}."
+        )
+
+    def run_evaluation(
+        step: int, epoch: int, batch_in_epoch: int, batches_per_epoch: int
+    ) -> dict[str, float]:
+        nonlocal best_eval_loss, best_eval_wer, best_eval_rows, best_wer_rows
+        nonlocal latest_eval_loss, latest_eval_rows
         metrics, evaluation_rows = evaluate(
             model,
             eval_loader,
@@ -723,11 +943,33 @@ def main() -> None:
         latest_eval_loss = metrics["eval/loss"]
         latest_eval_rows = evaluation_rows
         write_evaluation_csv(args.output_dir / "eval_predictions.csv", evaluation_rows)
-        metrics["eval/best_loss"] = min(best_eval_loss, metrics["eval/loss"])
-        if metrics["eval/loss"] < best_eval_loss:
+        improved_loss = metrics["eval/loss"] < best_eval_loss
+        improved_wer = metrics["eval/wer"] < best_eval_wer
+        if improved_loss:
             best_eval_loss = metrics["eval/loss"]
             best_eval_rows = evaluation_rows
+        if improved_wer:
+            best_eval_wer = metrics["eval/wer"]
+            best_wer_rows = evaluation_rows
+        metrics["eval/best_loss"] = best_eval_loss
+        metrics["eval/best_wer"] = best_eval_wer
+        if improved_loss:
             save_token_lid_lora_adapter(model, args.output_dir / "best_lora")
+            save_training_progress(
+                args.output_dir / "best_lora",
+                optimizer,
+                scaler,
+                epoch=epoch,
+                batch_in_epoch=batch_in_epoch,
+                batches_per_epoch=batches_per_epoch,
+                global_step=step,
+                configured_epochs=args.epochs,
+                best_eval_loss=best_eval_loss,
+                best_eval_wer=best_eval_wer,
+                batch_size=args.batch_size,
+                seed=args.seed,
+                training_clips=len(train_dataset),
+            )
             best_csv_path = args.output_dir / "best_eval_predictions.csv"
             write_evaluation_csv(best_csv_path, best_eval_rows)
             upsert_run_results(
@@ -737,20 +979,58 @@ def main() -> None:
                 evaluation_csv=best_csv_path,
                 metrics=metrics,
             )
-        metrics["eval/best_loss"] = best_eval_loss
+        if improved_wer:
+            best_wer_dir = args.output_dir / "best_wer"
+            save_token_lid_lora_adapter(model, best_wer_dir)
+            save_training_progress(
+                best_wer_dir,
+                optimizer,
+                scaler,
+                epoch=epoch,
+                batch_in_epoch=batch_in_epoch,
+                batches_per_epoch=batches_per_epoch,
+                global_step=step,
+                configured_epochs=args.epochs,
+                best_eval_loss=best_eval_loss,
+                best_eval_wer=best_eval_wer,
+                batch_size=args.batch_size,
+                seed=args.seed,
+                training_clips=len(train_dataset),
+            )
+            write_evaluation_csv(best_wer_csv_path, best_wer_rows)
         wandb.log(metrics, step=step)
         print(
             f"step {step}: loss={metrics['eval/loss']:.4f}, WER={metrics['eval/wer']:.3%}, "
-            f"LID accuracy={metrics['eval/lid_accuracy']:.3%}, best loss={best_eval_loss:.4f}"
+            f"LID accuracy={metrics['eval/lid_accuracy']:.3%}, "
+            f"best loss={best_eval_loss:.4f}, best WER={best_eval_wer:.3%}"
         )
         model.train()
+        release_evaluation_memory(device)
+        if device.type in {"mps", "cuda"}:
+            print(f"Released cached {device.type.upper()} evaluation memory")
         return metrics
 
     try:
-        for epoch in range(1, args.epochs + 1):
+        current_epoch = max(1, start_epoch)
+        current_batch = 0
+        current_batches_per_epoch = len(make_train_loader(current_epoch))
+        for epoch in range(start_epoch, args.epochs + 1):
+            current_epoch = epoch
             model.train()
-            progress = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
-            for batch in progress:
+            train_loader = make_train_loader(epoch)
+            current_batches_per_epoch = len(train_loader)
+            skip_batches = resume_batch_in_epoch if epoch == start_epoch else 0
+            train_iterator = iter(train_loader)
+            for _ in range(skip_batches):
+                next(train_iterator)
+            progress = tqdm(
+                train_iterator,
+                desc=f"Epoch {epoch}/{args.epochs}",
+                initial=skip_batches,
+                total=current_batches_per_epoch,
+            )
+            for batch_number, batch in enumerate(progress, start=skip_batches + 1):
+                current_batch = batch_number
                 optimizer.zero_grad(set_to_none=True)
                 autocast = torch.autocast(device_type="cuda", dtype=torch.float16) if device.type == "cuda" else contextlib.nullcontext()
                 with autocast:
@@ -778,7 +1058,9 @@ def main() -> None:
                 progress.set_postfix(loss=f"{train_metrics['train/loss']:.3f}")
 
                 if global_step % args.eval_every_steps == 0:
-                    run_evaluation(global_step)
+                    run_evaluation(
+                        global_step, epoch, batch_number, current_batches_per_epoch
+                    )
                     last_eval_step = global_step
                 if args.max_train_steps is not None and global_step >= args.max_train_steps:
                     reached_step_limit = True
@@ -788,16 +1070,22 @@ def main() -> None:
                 break
 
         if global_step != last_eval_step:
-            run_evaluation(global_step)
+            run_evaluation(
+                global_step,
+                current_epoch,
+                current_batch,
+                current_batches_per_epoch,
+            )
         if not best_eval_rows:
             raise RuntimeError("No held-out evaluation rows were produced")
-        save_token_lid_lora_adapter(model, args.output_dir / "final_lora")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_run_label = re.sub(r"[^A-Za-z0-9_-]+", "_", run_label)
         html_path = args.analysis_dir / f"{timestamp}_run_{safe_run_label}.html"
         write_evaluation_html(html_path, latest_eval_rows, run_label, latest_eval_loss)
         run.summary["best_eval_loss"] = best_eval_loss
+        run.summary["best_eval_wer"] = best_eval_wer
         run.summary["best_lora_adapter"] = str(args.output_dir / "best_lora")
+        run.summary["best_wer_adapter"] = str(args.output_dir / "best_wer")
         run.summary["evaluation_csv"] = str(args.output_dir / "eval_predictions.csv")
         run.summary["evaluation_html"] = str(html_path)
         print(f"Wrote final held-out evaluation review to {html_path}")

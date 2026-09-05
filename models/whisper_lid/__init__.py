@@ -10,6 +10,7 @@ from .model import (
 )
 from .model_lora import (
     encoder_decoder_linear_targets,
+    load_token_lid_lora_adapter,
     load_token_lid_lora_model,
     save_token_lid_lora_adapter,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "WhisperTokenLID",
     "decode_with_token_language",
     "encoder_decoder_linear_targets",
+    "load_token_lid_lora_adapter",
     "load_token_lid_checkpoint",
     "load_token_lid_lora_model",
     "save_token_lid_lora_adapter",

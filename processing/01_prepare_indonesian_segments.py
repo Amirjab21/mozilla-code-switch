@@ -30,6 +30,8 @@ FIELDNAMES = [
     "speakers", "word_langids", "language_counts", "utterance_ids",
     "dataset", "alignment_status", "alignment_confidence", "word_timestamps",
 ]
+EXCLUDED_FIELDNAMES = FIELDNAMES + ["exclusion_reason", "duration_ms"]
+DEVELOPMENT_MAX_DURATION_MS = 30_000
 WORD_PATTERN = re.compile(r"[^\W_]+(?:[-'’][^\W_]+)*", re.UNICODE)
 
 
@@ -261,6 +263,7 @@ def prepare_jember(
 def prepare_development(
     args: argparse.Namespace,
     output_rows: list[dict[str, str]],
+    excluded_rows: list[dict[str, str]],
     limit: int | None,
 ) -> None:
     with args.development_manifest.open(encoding="utf-8", newline="") as file:
@@ -268,26 +271,62 @@ def prepare_development(
     if limit is not None:
         development_rows = development_rows[:limit]
     minimum_ms = round(args.min_clip_seconds * 1000)
-    maximum_ms = round(args.max_clip_seconds * 1000)
     for number, row in enumerate(development_rows, start=1):
         source = args.development_audio_dir / row["audio_filename"]
         if not source.exists():
             print(f"Skipping missing development audio: {source}")
             continue
         transcript = row["transcript"].strip()
+        source_duration_ms = duration_ms(args.ffprobe, source)
         if transcript_word_count(transcript) < args.min_words:
             print(f"Skipping development clip with fewer than {args.min_words} words: {source}")
+            excluded = make_row(
+                source, transcript, source, 0, source_duration_ms,
+                row.get("speaker", "unknown"), [f"indonesian_dev:{number}"],
+                "indonesian_development", "excluded",
+            )
+            excluded.update({
+                "exclusion_reason": "fewer_than_minimum_words",
+                "duration_ms": str(source_duration_ms),
+            })
+            excluded_rows.append(excluded)
+            continue
+        if source_duration_ms > DEVELOPMENT_MAX_DURATION_MS:
+            print(
+                f"Excluding development clip over 30 seconds: {source} "
+                f"({source_duration_ms / 1000:.3f}s)"
+            )
+            excluded = make_row(
+                source, transcript, source, 0, source_duration_ms,
+                row.get("speaker", "unknown"), [f"indonesian_dev:{number}"],
+                "indonesian_development", "excluded",
+            )
+            excluded.update({
+                "exclusion_reason": "development_audio_over_30_seconds",
+                "duration_ms": str(source_duration_ms),
+            })
+            excluded_rows.append(excluded)
+            continue
+        if source_duration_ms < minimum_ms:
+            print(
+                f"Excluding development clip shorter than {args.min_clip_seconds:g} "
+                f"seconds: {source} ({source_duration_ms / 1000:.3f}s)"
+            )
+            excluded = make_row(
+                source, transcript, source, 0, source_duration_ms,
+                row.get("speaker", "unknown"), [f"indonesian_dev:{number}"],
+                "indonesian_development", "excluded",
+            )
+            excluded.update({
+                "exclusion_reason": "shorter_than_minimum_duration",
+                "duration_ms": str(source_duration_ms),
+            })
+            excluded_rows.append(excluded)
             continue
         output = args.output_dir / f"indonesian_dev_{source.stem}.wav"
         if not (args.reuse_existing and output.is_file()):
             transcode(args.ffmpeg, source, output)
         end_ms = duration_ms(args.ffprobe, output)
-        if not minimum_ms <= end_ms <= maximum_ms:
-            print(
-                f"Skipping out-of-range development clip {source}: "
-                f"{end_ms / 1000:.2f}s"
-            )
-            continue
         output_rows.append(make_row(
             output,
             transcript,
@@ -319,6 +358,11 @@ def main() -> None:
     parser.add_argument("--development-audio-dir", type=Path, default=Path("indonesian_data/indonesian_dev/clips"))
     parser.add_argument("--output-dir", type=Path, default=Path("processed_indonesia/01_segments"))
     parser.add_argument("--manifest", type=Path, default=Path("processed_indonesia/01_segments.csv"))
+    parser.add_argument(
+        "--excluded-manifest",
+        type=Path,
+        help="Excluded development clips CSV (default: 01_excluded.csv beside --manifest).",
+    )
     parser.add_argument("--jember-clips", type=int)
     parser.add_argument("--development-clips", type=int)
     parser.add_argument("--preview-per-dataset", type=int, help="Set both dataset limits; 100 creates up to 200 clips.")
@@ -327,7 +371,7 @@ def main() -> None:
     parser.add_argument("--max-development-clips", type=int, help="Deprecated alias for --development-clips.")
     parser.add_argument("--max-clips", type=int, help="Deprecated final combined cap.")
     parser.add_argument("--min-clip-seconds", type=float, default=3.0)
-    parser.add_argument("--max-clip-seconds", type=float, default=40.0)
+    parser.add_argument("--max-clip-seconds", type=float, default=30.0)
     parser.add_argument("--min-words", type=int, default=2)
     parser.add_argument("--reuse-existing", action="store_true")
     parser.add_argument("--ffmpeg", default="ffmpeg")
@@ -356,19 +400,33 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.manifest.parent.mkdir(parents=True, exist_ok=True)
+    if args.excluded_manifest is None:
+        args.excluded_manifest = args.manifest.with_name("01_excluded.csv")
+    args.excluded_manifest.parent.mkdir(parents=True, exist_ok=True)
     output_rows: list[dict[str, str]] = []
+    excluded_rows: list[dict[str, str]] = []
     prepare_jember(args, output_rows, args.jember_clips)
-    prepare_development(args, output_rows, args.development_clips)
+    prepare_development(
+        args, output_rows, excluded_rows, args.development_clips
+    )
     if args.max_clips is not None:
         output_rows = output_rows[:args.max_clips]
     with args.manifest.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=FIELDNAMES)
         writer.writeheader()
         writer.writerows(output_rows)
+    with args.excluded_manifest.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=EXCLUDED_FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(excluded_rows)
     counts = Counter(row["dataset"] for row in output_rows)
     print(
         f"Wrote {len(output_rows)} stage-1 segments to "
         f"{args.manifest}: {dict(counts)}"
+    )
+    print(
+        f"Wrote {len(excluded_rows)} excluded development clips to "
+        f"{args.excluded_manifest}"
     )
     link = viewer_url("segment_review.html", "manifest", args.manifest)
     if link:
