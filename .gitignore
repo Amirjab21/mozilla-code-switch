@@ -15,3 +15,5 @@ training_preview
 processed/preview
 
 processed_indonesia/
+
+.ffmpeg-env

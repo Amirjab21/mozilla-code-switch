@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -136,11 +137,26 @@ def main() -> None:
     apply_defaults(parser, config_values, config_args.config)
     args = parser.parse_args()
 
-    configured_training_output: Path | None = None
+    train_values: dict[str, object] = {}
     if args.config is not None:
         train_values, _ = load_section(args.config, "train")
-        if train_values.get("output_dir") is not None:
-            configured_training_output = Path(train_values["output_dir"])
+
+    # OpenAI Whisper invokes an executable literally named `ffmpeg`. When the
+    # CUDA/SageMaker caller supplies an explicit binary (for example, an
+    # isolated Conda installation), expose it to child stages through PATH.
+    # CPU and MPS runs retain their existing local environment unchanged.
+    ffmpeg_path = Path(args.ffmpeg).expanduser()
+    cuda_requested = (
+        args.start_match_device == "cuda"
+        or train_values.get("device") == "cuda"
+    )
+    if cuda_requested and ffmpeg_path.parent != Path("."):
+        ffmpeg_directory = str(ffmpeg_path.resolve().parent)
+        os.environ["PATH"] = ffmpeg_directory + os.pathsep + os.environ.get("PATH", "")
+
+    configured_training_output: Path | None = None
+    if train_values.get("output_dir") is not None:
+        configured_training_output = Path(train_values["output_dir"])
     training_output_dir = (
         args.training_output_dir
         or configured_training_output

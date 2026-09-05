@@ -1,0 +1,82 @@
+# Small end-to-end SageMaker/CUDA smoke test: prepare -> match -> noise -> train.
+# Speed/pitch augmentation is intentionally not configured or invoked.
+run_name: window_preview_noise_gpu_test
+
+pipeline:
+  output_dir: processed_indonesia/window_preview_noise_gpu_test
+  max_recordings: 1
+  jember_clips: 200
+  development_clips: 200
+  min_clip_seconds: 3.0
+  max_clip_seconds: 30.0
+  min_words: 2
+  reuse_existing: true
+  audio_seconds: 5.0
+  word_search_amount: 13
+  match_words: 2
+  closeness_metric: levenshtein
+  start_match_model: indonesian-nlp/wav2vec2-indonesian-javanese-sundanese
+  start_match_device: cuda
+  noise_dir: indonesian_data/room_noises
+  noise_copies_per_clip: 1
+  min_noise_fraction: 0.25
+  max_noise_fraction: 0.75
+  min_snr_db: 5.0
+  max_snr_db: 20.0
+  augmentation_seed: 1337
+
+prepare:
+  output_dir: processed_indonesia/window_preview_noise_gpu_test/01_segments
+  manifest: processed_indonesia/window_preview_noise_gpu_test/01_segments.csv
+  max_recordings: 1
+  jember_clips: 10
+  development_clips: 10
+  min_clip_seconds: 3.0
+  max_clip_seconds: 30.0
+  min_words: 2
+  reuse_existing: true
+
+match:
+  clips: processed_indonesia/window_preview_noise_gpu_test/01_segments.csv
+  output: processed_indonesia/window_preview_noise_gpu_test/clip_start_matches.json
+  output_csv: processed_indonesia/window_preview_noise_gpu_test/02_processed.csv
+  audio_seconds: 5.0
+  word_search_amount: 13
+  match_words: 2
+  closeness_metric: levenshtein
+  model: indonesian-nlp/wav2vec2-indonesian-javanese-sundanese
+  device: cuda
+
+augment:
+  input: processed_indonesia/window_preview_noise_gpu_test/02_processed.csv
+  output: processed_indonesia/window_preview_noise_gpu_test/03_dataset_with_augmented.csv
+  output_dir: processed_indonesia/window_preview_noise_gpu_test/03_augmented_audio
+  noise_dir: indonesian_data/room_noises
+  copies_per_clip: 1
+  min_noise_fraction: 0.25
+  max_noise_fraction: 0.75
+  min_snr_db: 5.0
+  max_snr_db: 20.0
+  seed: 1337
+
+train:
+  output_dir: processed_indonesia/window_preview_noise_gpu_test/05_whisper_small
+  base_model: small
+  language: id
+  epochs: 10
+  batch_size: 10
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.0
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  eval_indonesian_dev_clips: 8
+  eval_jember_clips: 8
+  eval_set_size: 16
+  eval_every_steps: 100
+  device: cuda
+  wandb_project: indonesian-whisper-small-lora
+  wandb_run_name: window-preview-noise-gpu-test
+  wandb_mode: online
+  manifest: processed_indonesia/window_preview_noise_gpu_test/03_dataset_with_augmented.csv
+  output_dir: processed_indonesia/window_preview_noise_gpu_test/05_whisper_small
