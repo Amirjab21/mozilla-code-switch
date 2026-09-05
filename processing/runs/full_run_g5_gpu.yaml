@@ -1,0 +1,86 @@
+# Full SageMaker ml.g5.8xlarge run: prepare -> match -> noise -> train.
+# No processing, dataset, or training limits are applied. Speed/pitch
+# augmentation is not configured and is not invoked by this pipeline.
+run_name: full_run_g5_gpu
+
+pipeline:
+  output_dir: processed_indonesia/full_run_g5_gpu
+  min_clip_seconds: 3.0
+  max_clip_seconds: 30.0
+  min_words: 2
+  # Retain the last four rows of each longest window before expanding the
+  # next block. Shorter windows still advance by at least one row.
+  jember_stride_overlap_rows: 4
+  prepare_workers: 16
+  reuse_existing: true
+  audio_seconds: 5.0
+  word_search_amount: 13
+  match_words: 2
+  closeness_metric: levenshtein
+  start_match_model: indonesian-nlp/wav2vec2-indonesian-javanese-sundanese
+  start_match_device: cuda
+  noise_dir: indonesian_data/room_noises
+  noise_copies_per_clip: 1
+  noise_augmentation_fraction: 1.0
+  min_noise_fraction: 0.25
+  max_noise_fraction: 0.75
+  min_snr_db: 5.0
+  max_snr_db: 20.0
+  augmentation_seed: 1337
+  augment_workers: 16
+
+prepare:
+  output_dir: processed_indonesia/full_run_g5_gpu/01_segments
+  manifest: processed_indonesia/full_run_g5_gpu/01_segments.csv
+  min_clip_seconds: 3.0
+  max_clip_seconds: 30.0
+  min_words: 2
+  jember_stride_overlap_rows: 4
+  prepare_workers: 16
+  reuse_existing: true
+
+match:
+  clips: processed_indonesia/full_run_g5_gpu/01_segments.csv
+  output: processed_indonesia/full_run_g5_gpu/clip_start_matches.json
+  output_csv: processed_indonesia/full_run_g5_gpu/02_processed.csv
+  audio_seconds: 5.0
+  word_search_amount: 13
+  match_words: 2
+  closeness_metric: levenshtein
+  model: indonesian-nlp/wav2vec2-indonesian-javanese-sundanese
+  device: cuda
+
+augment:
+  input: processed_indonesia/full_run_g5_gpu/02_processed.csv
+  output: processed_indonesia/full_run_g5_gpu/03_dataset_with_augmented.csv
+  output_dir: processed_indonesia/full_run_g5_gpu/03_augmented_audio
+  noise_dir: indonesian_data/room_noises
+  copies_per_clip: 1
+  augmentation_fraction: 1.0
+  min_noise_fraction: 0.25
+  max_noise_fraction: 0.75
+  min_snr_db: 5.0
+  max_snr_db: 20.0
+  seed: 1337
+  workers: 16
+
+train:
+  manifest: processed_indonesia/full_run_g5_gpu/03_dataset_with_augmented.csv
+  output_dir: processed_indonesia/full_run_g5_gpu/05_whisper_small
+  base_model: small
+  language: id
+  epochs: 10
+  batch_size: 12
+  num_workers: 8
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.0
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  eval_indonesian_dev_speakers: "5,7"
+  eval_other_indonesian_dev_clips_per_speaker: 5
+  eval_every_steps: 600
+  device: cuda
+  wandb_project: indonesian-whisper-small-lora
+  wandb_run_name: full-run-g5-gpu
+  wandb_mode: online

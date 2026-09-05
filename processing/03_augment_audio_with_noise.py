@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import csv
 import random
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
@@ -25,6 +27,21 @@ METADATA_FIELDS = [
     "augmentation_start_ms",
     "augmentation_end_ms",
 ]
+
+
+@dataclass(frozen=True)
+class AugmentationJob:
+    """One independently reproducible noise-augmentation task."""
+
+    row: dict[str, str]
+    output_dir: Path
+    noise_files: list[Path]
+    seed: int
+    minimum_noise_fraction: float
+    maximum_noise_fraction: float
+    minimum_snr_db: float
+    maximum_snr_db: float
+    copy_number: int
 
 
 def viewer_url(manifest: Path) -> str | None:
@@ -160,6 +177,21 @@ def augment_row(
     return augmented
 
 
+def run_augmentation_job(job: AugmentationJob) -> dict[str, str]:
+    """Run a job in either the main process or a worker process."""
+    return augment_row(
+        job.row,
+        job.output_dir,
+        job.noise_files,
+        random.Random(job.seed),
+        job.minimum_noise_fraction,
+        job.maximum_noise_fraction,
+        job.minimum_snr_db,
+        job.maximum_snr_db,
+        job.copy_number,
+    )
+
+
 def main() -> None:
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument("--config", type=Path)
@@ -184,6 +216,12 @@ def main() -> None:
     parser.add_argument("--min-snr-db", type=float, default=5.0)
     parser.add_argument("--max-snr-db", type=float, default=20.0)
     parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of audio augmentations to process concurrently.",
+    )
     parser.add_argument("--limit", type=int, help="Augment only the first N rows for a preview.")
     apply_defaults(parser, config_values, config_args.config)
     args = parser.parse_args()
@@ -202,6 +240,8 @@ def main() -> None:
         parser.error("--min-snr-db cannot exceed --max-snr-db")
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be at least 1")
+    if args.workers < 1:
+        parser.error("--workers must be at least 1")
 
     with args.input.open(encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
@@ -212,7 +252,6 @@ def main() -> None:
 
     noise_files = find_noise_files(args.noise_dir)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    rng = random.Random(args.seed)
     clean_rows: list[dict[str, str]] = []
     augmented_rows: list[dict[str, str]] = []
     eligible_rows = rows if args.limit is None else rows[: args.limit]
@@ -230,14 +269,38 @@ def main() -> None:
             "augmentation_end_ms": "",
         })
         clean_rows.append(clean)
-    for index, row in enumerate(rows_to_augment, start=1):
+    seed_rng = random.Random(args.seed)
+    jobs: list[AugmentationJob] = []
+    for row in rows_to_augment:
         for copy_number in range(1, args.copies_per_clip + 1):
-            augmented_rows.append(augment_row(
-                row, args.output_dir, noise_files, rng,
-                args.min_noise_fraction, args.max_noise_fraction,
-                args.min_snr_db, args.max_snr_db, copy_number,
+            jobs.append(AugmentationJob(
+                row=row,
+                output_dir=args.output_dir,
+                noise_files=noise_files,
+                seed=seed_rng.getrandbits(64),
+                minimum_noise_fraction=args.min_noise_fraction,
+                maximum_noise_fraction=args.max_noise_fraction,
+                minimum_snr_db=args.min_snr_db,
+                maximum_snr_db=args.max_snr_db,
+                copy_number=copy_number,
             ))
-        print(f"[{index}/{len(rows_to_augment)}] augmented {row['audio_path']}")
+
+    if args.workers == 1 or len(jobs) < 2:
+        results = map(run_augmentation_job, jobs)
+        executor = None
+    else:
+        executor = ProcessPoolExecutor(max_workers=min(args.workers, len(jobs)))
+        results = executor.map(run_augmentation_job, jobs, chunksize=1)
+    try:
+        for index, augmented in enumerate(results, start=1):
+            augmented_rows.append(augmented)
+            print(
+                f"[{index}/{len(jobs)}] augmented "
+                f"{augmented['augmentation_source_audio']}"
+            )
+    finally:
+        if executor is not None:
+            executor.shutdown()
 
     fieldnames = input_fields + [field for field in METADATA_FIELDS if field not in input_fields]
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -249,7 +312,8 @@ def main() -> None:
     print(
         f"Wrote {len(clean_rows)} clean + {len(augmented_rows)} augmented rows "
         f"to {args.output} using {len(noise_files)} noise files "
-        f"({args.augmentation_fraction:.1%} augmentation selection)"
+        f"({args.augmentation_fraction:.1%} augmentation selection, "
+        f"{args.workers} worker{'s' if args.workers != 1 else ''})"
     )
     link = viewer_url(args.output)
     if link:

@@ -96,6 +96,12 @@ def main() -> None:
     )
     parser.add_argument("--min-words", type=int, default=2)
     parser.add_argument(
+        "--jember-stride-overlap-rows",
+        type=int,
+        default=2,
+        help="Jember rows retained between consecutive expanding blocks.",
+    )
+    parser.add_argument(
         "--prepare-workers", type=int, default=1,
         help="Number of Jember recordings prepared concurrently in stage 1.",
     )
@@ -137,6 +143,10 @@ def main() -> None:
     parser.add_argument("--min-snr-db", type=float, default=5.0)
     parser.add_argument("--max-snr-db", type=float, default=20.0)
     parser.add_argument("--augmentation-seed", type=int, default=1337)
+    parser.add_argument(
+        "--augment-workers", type=int, default=1,
+        help="Number of concurrent audio workers used by stage 3.",
+    )
     parser.add_argument(
         "--training-output-dir", type=Path,
         help=(
@@ -191,6 +201,7 @@ def main() -> None:
         "--min-clip-seconds", str(args.min_clip_seconds),
         "--max-clip-seconds", str(args.max_clip_seconds),
         "--min-words", str(args.min_words),
+        "--jember-stride-overlap-rows", str(args.jember_stride_overlap_rows),
         "--prepare-workers", str(args.prepare_workers),
     ]
     optional_stage_1_args = (
@@ -238,6 +249,7 @@ def main() -> None:
         "--min-snr-db", str(args.min_snr_db),
         "--max-snr-db", str(args.max_snr_db),
         "--seed", str(args.augmentation_seed),
+        "--workers", str(args.augment_workers),
     ]
     run("03_augment_audio_with_noise.py", stage_3_args)
 

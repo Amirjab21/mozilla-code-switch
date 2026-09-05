@@ -3,8 +3,9 @@
 
 Every output is mono 16 kHz PCM WAV. From each selected Jember starting row,
 stage 1 emits every valid expanding prefix until another row would exceed the
-maximum duration. The next block begins at the second-to-last row of that
-longest prefix, retaining boundary overlap without restarting at every row.
+maximum duration. The next block retains a configurable number of rows from
+the end of that longest prefix, preserving boundary overlap without restarting
+at every row.
 """
 
 from __future__ import annotations
@@ -77,6 +78,7 @@ class JemberRecordingJob:
     minimum_ms: int
     maximum_ms: int
     minimum_words: int
+    stride_overlap_rows: int
     reuse_existing: bool
     clip_limit: int | None = None
 
@@ -177,7 +179,11 @@ def prepare_jember_recording(
     )
     windows = list(
         enumerate_jember_windows(
-            parsed_rows, job.minimum_ms, job.maximum_ms, job.minimum_words
+            parsed_rows,
+            job.minimum_ms,
+            job.maximum_ms,
+            job.minimum_words,
+            job.stride_overlap_rows,
         )
     )
     if job.clip_limit is not None:
@@ -284,8 +290,9 @@ def enumerate_jember_windows(
     minimum_ms: int,
     maximum_ms: int,
     minimum_words: int,
+    stride_overlap_rows: int = 2,
 ) -> Iterator[JemberWindow]:
-    """Yield expanding prefixes, then stride with a two-row block overlap."""
+    """Yield expanding prefixes, retaining rows at each block boundary."""
     first_index = 0
     while first_index < len(source_rows):
         first = source_rows[first_index]
@@ -325,10 +332,11 @@ def enumerate_jember_windows(
             # A malformed/overlong starting row must never stall enumeration.
             first_index += 1
             continue
-        # If the longest emitted prefix was [start, ..., end], start the next
-        # block at end - 1: the second-to-last included TSV row. Very short
-        # blocks fall back to advancing one row to guarantee forward progress.
-        first_index = max(first_index + 1, longest_valid_index - 1)
+        # If the longest prefix was [start, ..., end], retain the configured
+        # number of rows at its end. An overlap of two therefore starts at the
+        # second-to-last row. Always advance at least one row.
+        next_index = longest_valid_index - stride_overlap_rows + 1
+        first_index = max(first_index + 1, next_index)
 
 
 def prepare_jember(
@@ -370,6 +378,7 @@ def prepare_jember(
                 minimum_ms=minimum_ms,
                 maximum_ms=maximum_ms,
                 minimum_words=args.min_words,
+                stride_overlap_rows=args.jember_stride_overlap_rows,
                 reuse_existing=args.reuse_existing,
             )
         )
@@ -522,6 +531,15 @@ def main() -> None:
     parser.add_argument("--max-clip-seconds", type=float, default=30.0)
     parser.add_argument("--min-words", type=int, default=2)
     parser.add_argument(
+        "--jember-stride-overlap-rows",
+        type=int,
+        default=2,
+        help=(
+            "Rows retained from the end of the longest Jember window when "
+            "starting the next expanding block (2 starts at the second-last row)."
+        ),
+    )
+    parser.add_argument(
         "--prepare-workers",
         type=int,
         default=1,
@@ -551,6 +569,8 @@ def main() -> None:
         parser.error("--max-clip-seconds must be greater than --min-clip-seconds > 0")
     if args.min_words < 1:
         parser.error("--min-words must be at least 1")
+    if args.jember_stride_overlap_rows < 0:
+        parser.error("--jember-stride-overlap-rows cannot be negative")
     if args.prepare_workers < 1:
         parser.error("--prepare-workers must be at least 1")
 

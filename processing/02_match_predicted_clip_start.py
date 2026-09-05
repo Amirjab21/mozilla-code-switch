@@ -395,9 +395,19 @@ def main() -> None:
             else "mps" if torch.backends.mps.is_available()
             else "cpu"
         )
+    if device == "cuda" and not torch.cuda.is_available():
+        parser.error(
+            "--device cuda was requested, but torch.cuda.is_available() is false"
+        )
     print(f"Loading {args.model} on {device}")
     processor = Wav2Vec2Processor.from_pretrained(args.model)
     model = AutoModelForCTC.from_pretrained(args.model).to(device).eval()
+    model_device = next(model.parameters()).device
+    print(f"Wav2Vec2 model parameters loaded on {model_device}")
+    if device == "cuda" and model_device.type != "cuda":
+        raise RuntimeError(
+            f"Wav2Vec2 was requested on CUDA but loaded on {model_device}"
+        )
     metric = METRICS[args.closeness_metric]
     results = []
 
