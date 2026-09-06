@@ -60,6 +60,8 @@ def main() -> None:
         type=Path,
         default=Path("indonesian_data/indonesian_dev/clips"),
     )
+    parser.add_argument("--development-corrected-long-clips", type=Path)
+    parser.add_argument("--development-corrected-long-audio-dir", type=Path)
     parser.add_argument(
         "--output-dir", type=Path, default=Path("processed_indonesia")
     )
@@ -91,6 +93,10 @@ def main() -> None:
     )
     parser.add_argument("--min-clip-seconds", type=float, default=3.0)
     parser.add_argument("--max-clip-seconds", type=float, default=40.0)
+    parser.add_argument("--jember-min-clip-seconds", type=float)
+    parser.add_argument("--jember-max-clip-seconds", type=float)
+    parser.add_argument("--development-min-clip-seconds", type=float)
+    parser.add_argument("--development-max-clip-seconds", type=float)
     parser.add_argument(
         "--max-clips", type=int, help="Deprecated final combined cap."
     )
@@ -215,6 +221,18 @@ def main() -> None:
         "--prepare-workers", str(args.prepare_workers),
     ]
     optional_stage_1_args = (
+        (
+            "--development-corrected-long-clips",
+            args.development_corrected_long_clips,
+        ),
+        (
+            "--development-corrected-long-audio-dir",
+            args.development_corrected_long_audio_dir,
+        ),
+        ("--jember-min-clip-seconds", args.jember_min_clip_seconds),
+        ("--jember-max-clip-seconds", args.jember_max_clip_seconds),
+        ("--development-min-clip-seconds", args.development_min_clip_seconds),
+        ("--development-max-clip-seconds", args.development_max_clip_seconds),
         ("--max-recordings", args.max_recordings),
         ("--max-segments-per-recording", args.max_segments_per_recording),
         ("--max-development-clips", args.max_development_clips),

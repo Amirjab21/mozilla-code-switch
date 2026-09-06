@@ -7,10 +7,16 @@ pipeline:
   output_dir: processed_indonesia/full_run_g5_whisper_medium
   min_clip_seconds: 6.0
   max_clip_seconds: 30.0
+  jember_min_clip_seconds: 10.0
+  jember_max_clip_seconds: 25.0
+  development_min_clip_seconds: 6.0
+  development_max_clip_seconds: 30.0
+  development_corrected_long_clips: indonesian_data/indonesian_dev/corrected_above30seconds_indonesian_dev.csv
+  development_corrected_long_audio_dir: indonesian_data/indonesian_dev/corrected_above30seconds_audio
   min_words: 2
   # Retain the last four rows of each longest window before expanding the
   # next block. Shorter windows still advance by at least one row.
-  jember_stride_overlap_rows: 2
+  jember_stride_overlap_rows: 0
   prepare_workers: 16
   reuse_existing: true
   audio_seconds: 5.0
@@ -34,8 +40,14 @@ prepare:
   manifest: processed_indonesia/full_run_g5_whisper_medium/01_segments.csv
   min_clip_seconds: 6.0
   max_clip_seconds: 30.0
+  jember_min_clip_seconds: 10.0
+  jember_max_clip_seconds: 25.0
+  development_min_clip_seconds: 6.0
+  development_max_clip_seconds: 30.0
+  development_corrected_long_clips: indonesian_data/indonesian_dev/corrected_above30seconds_indonesian_dev.csv
+  development_corrected_long_audio_dir: indonesian_data/indonesian_dev/corrected_above30seconds_audio
   min_words: 2
-  jember_stride_overlap_rows: 2
+  jember_stride_overlap_rows: 0
   prepare_workers: 16
   reuse_existing: true
 

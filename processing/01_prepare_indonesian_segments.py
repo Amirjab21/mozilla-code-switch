@@ -34,7 +34,6 @@ FIELDNAMES = [
     "dataset", "alignment_status", "alignment_confidence", "word_timestamps",
 ]
 EXCLUDED_FIELDNAMES = FIELDNAMES + ["exclusion_reason", "duration_ms"]
-DEVELOPMENT_MAX_DURATION_MS = 30_000
 WORD_PATTERN = re.compile(r"[^\W_]+(?:[-'’][^\W_]+)*", re.UNICODE)
 
 
@@ -356,8 +355,8 @@ def prepare_jember(
     if args.max_recordings is not None:
         recording_ids = recording_ids[:args.max_recordings]
 
-    minimum_ms = round(args.min_clip_seconds * 1000)
-    maximum_ms = round(args.max_clip_seconds * 1000)
+    minimum_ms = round(args.jember_min_clip_seconds * 1000)
+    maximum_ms = round(args.jember_max_clip_seconds * 1000)
     jobs: list[JemberRecordingJob] = []
     for recording_id in recording_ids:
         source = args.jember_audio_dir / f"{recording_id}.mp3"
@@ -423,11 +422,33 @@ def prepare_development(
     excluded_rows: list[dict[str, str]],
     limit: int | None,
 ) -> None:
+    corrected_by_original: dict[str, list[dict[str, str]]] = {}
+    if args.development_corrected_long_clips is not None:
+        with args.development_corrected_long_clips.open(
+            encoding="utf-8-sig", newline=""
+        ) as file:
+            corrected_rows = list(csv.DictReader(file))
+        required = {"original_audio_path", "corrected_transcript", "audio_path"}
+        missing = required.difference(corrected_rows[0] if corrected_rows else ())
+        if missing:
+            raise ValueError(
+                f"{args.development_corrected_long_clips} is missing columns: "
+                f"{', '.join(sorted(missing))}"
+            )
+        for corrected in corrected_rows:
+            original_name = Path(corrected["original_audio_path"]).name
+            corrected_by_original.setdefault(original_name, []).append(corrected)
+        print(
+            f"Loaded {len(corrected_rows)} corrected long-clip parts for "
+            f"{len(corrected_by_original)} Indonesian-dev recordings"
+        )
+
     with args.development_manifest.open(encoding="utf-8", newline="") as file:
         development_rows = list(csv.DictReader(file, delimiter="\t"))
     if limit is not None:
         development_rows = development_rows[:limit]
-    minimum_ms = round(args.min_clip_seconds * 1000)
+    minimum_ms = round(args.development_min_clip_seconds * 1000)
+    maximum_ms = round(args.development_max_clip_seconds * 1000)
     for number, row in enumerate(development_rows, start=1):
         source = args.development_audio_dir / row["audio_filename"]
         if not source.exists():
@@ -448,9 +469,53 @@ def prepare_development(
             })
             excluded_rows.append(excluded)
             continue
-        if source_duration_ms > DEVELOPMENT_MAX_DURATION_MS:
+        corrected_parts = corrected_by_original.get(source.name, [])
+        if source_duration_ms > maximum_ms and corrected_parts:
+            for part_number, corrected in enumerate(corrected_parts, start=1):
+                corrected_source = Path(corrected["audio_path"])
+                if args.development_corrected_long_audio_dir is not None:
+                    corrected_source = (
+                        args.development_corrected_long_audio_dir
+                        / corrected_source.name
+                    )
+                if not corrected_source.is_file():
+                    raise FileNotFoundError(
+                        f"Corrected split audio not found: {corrected_source}"
+                    )
+                corrected_transcript = corrected["corrected_transcript"].strip()
+                if not corrected_transcript:
+                    raise ValueError(
+                        f"Corrected transcript is empty for {corrected_source}"
+                    )
+                corrected_duration_ms = duration_ms(args.ffprobe, corrected_source)
+                if corrected_duration_ms > maximum_ms:
+                    raise ValueError(
+                        f"Corrected split exceeds the Indonesian-dev maximum "
+                        f"duration ({args.development_max_clip_seconds:g}s): "
+                        f"{corrected_source}"
+                    )
+                output = args.output_dir / (
+                    f"indonesian_dev_{corrected_source.stem}.wav"
+                )
+                if not (args.reuse_existing and output.is_file()):
+                    transcode(args.ffmpeg, corrected_source, output)
+                output_duration_ms = duration_ms(args.ffprobe, output)
+                output_rows.append(make_row(
+                    output,
+                    corrected_transcript,
+                    source,
+                    0,
+                    output_duration_ms,
+                    row.get("speaker", "unknown"),
+                    [f"indonesian_dev:{number}:corrected_part_{part_number}"],
+                    "indonesian_development",
+                    "manually_corrected_long_clip_split",
+                ))
+            continue
+        if source_duration_ms > maximum_ms:
             print(
-                f"Excluding development clip over 30 seconds: {source} "
+                f"Excluding development clip over "
+                f"{args.development_max_clip_seconds:g} seconds: {source} "
                 f"({source_duration_ms / 1000:.3f}s)"
             )
             excluded = make_row(
@@ -459,14 +524,15 @@ def prepare_development(
                 "indonesian_development", "excluded",
             )
             excluded.update({
-                "exclusion_reason": "development_audio_over_30_seconds",
+                "exclusion_reason": "development_audio_over_maximum_duration",
                 "duration_ms": str(source_duration_ms),
             })
             excluded_rows.append(excluded)
             continue
         if source_duration_ms < minimum_ms:
             print(
-                f"Excluding development clip shorter than {args.min_clip_seconds:g} "
+                f"Excluding development clip shorter than "
+                f"{args.development_min_clip_seconds:g} "
                 f"seconds: {source} ({source_duration_ms / 1000:.3f}s)"
             )
             excluded = make_row(
@@ -513,6 +579,16 @@ def main() -> None:
     parser.add_argument("--jember-audio-dir", type=Path, default=Path("indonesian_data/Jember Javanese Spontaneous Speech Corpus/mp3 audio"))
     parser.add_argument("--development-manifest", type=Path, default=Path("indonesian_data/indonesian_dev/metadata.tsv"))
     parser.add_argument("--development-audio-dir", type=Path, default=Path("indonesian_data/indonesian_dev/clips"))
+    parser.add_argument(
+        "--development-corrected-long-clips",
+        type=Path,
+        help="CSV containing manually corrected splits for development clips over the maximum duration.",
+    )
+    parser.add_argument(
+        "--development-corrected-long-audio-dir",
+        type=Path,
+        help="Optional directory containing the corrected split audio files named in the corrected CSV.",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("processed_indonesia/01_segments"))
     parser.add_argument("--manifest", type=Path, default=Path("processed_indonesia/01_segments.csv"))
     parser.add_argument(
@@ -529,6 +605,22 @@ def main() -> None:
     parser.add_argument("--max-clips", type=int, help="Deprecated final combined cap.")
     parser.add_argument("--min-clip-seconds", type=float, default=3.0)
     parser.add_argument("--max-clip-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--jember-min-clip-seconds", type=float,
+        help="Jember minimum duration; defaults to --min-clip-seconds.",
+    )
+    parser.add_argument(
+        "--jember-max-clip-seconds", type=float,
+        help="Jember maximum duration; defaults to --max-clip-seconds.",
+    )
+    parser.add_argument(
+        "--development-min-clip-seconds", type=float,
+        help="Indonesian-dev minimum duration; defaults to --min-clip-seconds.",
+    )
+    parser.add_argument(
+        "--development-max-clip-seconds", type=float,
+        help="Indonesian-dev maximum duration; defaults to --max-clip-seconds.",
+    )
     parser.add_argument("--min-words", type=int, default=2)
     parser.add_argument(
         "--jember-stride-overlap-rows",
@@ -551,6 +643,23 @@ def main() -> None:
     apply_defaults(parser, config_values, config_args.config)
     args = parser.parse_args()
 
+    args.jember_min_clip_seconds = (
+        args.jember_min_clip_seconds
+        if args.jember_min_clip_seconds is not None else args.min_clip_seconds
+    )
+    args.jember_max_clip_seconds = (
+        args.jember_max_clip_seconds
+        if args.jember_max_clip_seconds is not None else args.max_clip_seconds
+    )
+    args.development_min_clip_seconds = (
+        args.development_min_clip_seconds
+        if args.development_min_clip_seconds is not None else args.min_clip_seconds
+    )
+    args.development_max_clip_seconds = (
+        args.development_max_clip_seconds
+        if args.development_max_clip_seconds is not None else args.max_clip_seconds
+    )
+
     if shutil.which(args.ffmpeg) is None or shutil.which(args.ffprobe) is None:
         parser.error("ffmpeg and ffprobe must be installed")
     for path in (
@@ -561,12 +670,37 @@ def main() -> None:
     ):
         if not path.exists():
             parser.error(f"Input not found: {path}")
+    if (
+        args.development_corrected_long_clips is not None
+        and not args.development_corrected_long_clips.is_file()
+    ):
+        parser.error(
+            f"Input not found: {args.development_corrected_long_clips}"
+        )
+    if (
+        args.development_corrected_long_audio_dir is not None
+        and not args.development_corrected_long_audio_dir.is_dir()
+    ):
+        parser.error(
+            f"Input not found: {args.development_corrected_long_audio_dir}"
+        )
     if args.preview_per_dataset is not None:
         args.jember_clips = args.development_clips = args.preview_per_dataset
     if args.max_development_clips is not None and args.development_clips is None:
         args.development_clips = args.max_development_clips
-    if args.min_clip_seconds <= 0 or args.max_clip_seconds <= args.min_clip_seconds:
-        parser.error("--max-clip-seconds must be greater than --min-clip-seconds > 0")
+    for dataset, minimum, maximum in (
+        ("Jember", args.jember_min_clip_seconds, args.jember_max_clip_seconds),
+        (
+            "Indonesian-dev",
+            args.development_min_clip_seconds,
+            args.development_max_clip_seconds,
+        ),
+    ):
+        if minimum <= 0 or maximum <= minimum:
+            parser.error(
+                f"{dataset} maximum clip duration must be greater than its "
+                "minimum duration, which must be above zero"
+            )
     if args.min_words < 1:
         parser.error("--min-words must be at least 1")
     if args.jember_stride_overlap_rows < 0:
