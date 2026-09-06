@@ -10,8 +10,8 @@ pipeline:
   min_words: 2
   # Retain the last four rows of each longest window before expanding the
   # next block. Shorter windows still advance by at least one row.
-  jember_stride_overlap_rows: 4
-  prepare_workers: 16
+  jember_stride_overlap_rows: 1
+  prepare_workers: 8
   reuse_existing: true
   audio_seconds: 5.0
   word_search_amount: 13
@@ -20,8 +20,8 @@ pipeline:
   start_match_model: indonesian-nlp/wav2vec2-indonesian-javanese-sundanese
   start_match_device: cuda
   noise_dir: indonesian_data/room_noises
-  noise_copies_per_clip: 1
-  noise_augmentation_fraction: 1.0
+  jember_augmentation_multiplier: 0.1
+  development_augmentation_multiplier: 10.0
   min_noise_fraction: 0.25
   max_noise_fraction: 0.75
   min_snr_db: 5.0
@@ -35,8 +35,8 @@ prepare:
   min_clip_seconds: 3.0
   max_clip_seconds: 30.0
   min_words: 2
-  jember_stride_overlap_rows: 4
-  prepare_workers: 16
+  jember_stride_overlap_rows: 1
+  prepare_workers: 8
   reuse_existing: true
 
 match:
@@ -55,8 +55,8 @@ augment:
   output: processed_indonesia/full_run_g5_gpu/03_dataset_with_augmented.csv
   output_dir: processed_indonesia/full_run_g5_gpu/03_augmented_audio
   noise_dir: indonesian_data/room_noises
-  copies_per_clip: 1
-  augmentation_fraction: 1.0
+  jember_augmentation_multiplier: 0.5
+  development_augmentation_multiplier: 5.0
   min_noise_fraction: 0.25
   max_noise_fraction: 0.75
   min_snr_db: 5.0
@@ -70,7 +70,7 @@ train:
   base_model: small
   language: id
   epochs: 10
-  batch_size: 12
+  batch_size: 9
   num_workers: 8
   lora_rank: 16
   lora_alpha: 32
