@@ -1,0 +1,98 @@
+{
+  "epoch": 1,
+  "completed_epochs": 0,
+  "batch_in_epoch": 1200,
+  "batches_per_epoch": 1422,
+  "epoch_progress": 0.8438818565400844,
+  "global_step": 1200,
+  "configured_epochs": 10,
+  "batch_size": 9,
+  "seed": 1337,
+  "training_clips": 12798,
+  "best_eval_loss": 1.0103626118765936,
+  "best_eval_wer": 0.42346938775510207,
+  "current_loss_heap": [
+    [
+      4.596583843231201,
+      "processed_indonesia/first_full_run_gpu/03_augmented_audio/jember_159_0014-0015__noise_01.wav"
+    ],
+    [
+      4.6443095207214355,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_035_0011-0011.wav"
+    ],
+    [
+      4.806686878204346,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_048_0017-0017.wav"
+    ],
+    [
+      4.796810626983643,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_160_0010-0010.wav"
+    ],
+    [
+      4.719242095947266,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_035_0003-0003.wav"
+    ],
+    [
+      4.874351501464844,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_127_0011-0012.wav"
+    ],
+    [
+      5.252631664276123,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_035_0005-0005.wav"
+    ],
+    [
+      5.0612616539001465,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_159_0014-0015.wav"
+    ],
+    [
+      4.808505058288574,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_153_0001-0002.wav"
+    ],
+    [
+      5.07013463973999,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_103_0001-0001.wav"
+    ],
+    [
+      5.820602893829346,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_002_0317-0317.wav"
+    ],
+    [
+      4.940461158752441,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_035_0027-0027.wav"
+    ],
+    [
+      7.686245918273926,
+      "processed_indonesia/first_full_run_gpu/03_augmented_audio/jember_093_0001-0001__noise_01.wav"
+    ],
+    [
+      5.800057411193848,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_204_0063-0063.wav"
+    ],
+    [
+      5.662168025970459,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_035_0032-0033.wav"
+    ],
+    [
+      5.150829315185547,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_092_0014-0014.wav"
+    ],
+    [
+      6.756145000457764,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_023_0040-0040.wav"
+    ],
+    [
+      5.775615215301514,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_092_0016-0016.wav"
+    ],
+    [
+      6.093963623046875,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_023_0040-0041.wav"
+    ],
+    [
+      6.270431995391846,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_035_0033-0033.wav"
+    ]
+  ],
+  "completed_high_losses": [],
+  "saved_at": "2026-09-05T20:57:23+00:00"
+}

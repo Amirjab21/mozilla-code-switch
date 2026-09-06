@@ -1,0 +1,199 @@
+{
+  "epoch": 2,
+  "completed_epochs": 1,
+  "batch_in_epoch": 378,
+  "batches_per_epoch": 1422,
+  "epoch_progress": 0.26582278481012656,
+  "global_step": 1800,
+  "configured_epochs": 10,
+  "batch_size": 9,
+  "seed": 1337,
+  "training_clips": 12798,
+  "best_eval_loss": 1.0103626118765936,
+  "best_eval_wer": 0.3596938775510204,
+  "current_loss_heap": [
+    [
+      2.6257388591766357,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_002_0242-0242.wav"
+    ],
+    [
+      2.708958387374878,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_035_0029-0029.wav"
+    ],
+    [
+      2.754680633544922,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_027_0041-0041.wav"
+    ],
+    [
+      2.726660966873169,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_035_0011-0012.wav"
+    ],
+    [
+      2.865478038787842,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_035_0028-0028.wav"
+    ],
+    [
+      2.780578136444092,
+      "processed_indonesia/first_full_run_gpu/03_augmented_audio/jember_035_0008-0009__noise_01.wav"
+    ],
+    [
+      2.7615950107574463,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_035_0020-0021.wav"
+    ],
+    [
+      3.0946531295776367,
+      "processed_indonesia/first_full_run_gpu/03_augmented_audio/jember_023_0040-0040__noise_01.wav"
+    ],
+    [
+      3.7316806316375732,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_049_0001-0001.wav"
+    ],
+    [
+      3.3128063678741455,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_001_0001-0001.wav"
+    ],
+    [
+      3.329307794570923,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_001_0011-0011.wav"
+    ],
+    [
+      4.238478183746338,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_130_0011-0011.wav"
+    ],
+    [
+      3.2758657932281494,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_063_0001-0001.wav"
+    ],
+    [
+      4.6669392585754395,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_150_0012-0012.wav"
+    ],
+    [
+      3.7279069423675537,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_041_0050-0050.wav"
+    ],
+    [
+      4.8211140632629395,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_106_0050-0050.wav"
+    ],
+    [
+      3.840198040008545,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_002_0317-0317.wav"
+    ],
+    [
+      4.078318119049072,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_127_0011-0012.wav"
+    ],
+    [
+      6.094763278961182,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_045_0041-0041.wav"
+    ],
+    [
+      3.402308464050293,
+      "processed_indonesia/first_full_run_gpu/01_segments/jember_023_0040-0040.wav"
+    ]
+  ],
+  "completed_high_losses": [
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/03_augmented_audio/jember_093_0001-0001__noise_01.wav",
+      "epoch": 1,
+      "loss": 7.686245918273926
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_023_0040-0040.wav",
+      "epoch": 1,
+      "loss": 6.756145000457764
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_035_0033-0033.wav",
+      "epoch": 1,
+      "loss": 6.270431995391846
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_023_0040-0041.wav",
+      "epoch": 1,
+      "loss": 6.093963623046875
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_093_0001-0001.wav",
+      "epoch": 1,
+      "loss": 5.985038757324219
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_002_0317-0317.wav",
+      "epoch": 1,
+      "loss": 5.820602893829346
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_204_0063-0063.wav",
+      "epoch": 1,
+      "loss": 5.800057411193848
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_092_0016-0016.wav",
+      "epoch": 1,
+      "loss": 5.775615215301514
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_035_0032-0033.wav",
+      "epoch": 1,
+      "loss": 5.662168025970459
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_048_0017-0018.wav",
+      "epoch": 1,
+      "loss": 5.467304229736328
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_106_0050-0050.wav",
+      "epoch": 1,
+      "loss": 5.403467655181885
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_035_0005-0005.wav",
+      "epoch": 1,
+      "loss": 5.252631664276123
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_092_0014-0014.wav",
+      "epoch": 1,
+      "loss": 5.150829315185547
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_051_0015-0015.wav",
+      "epoch": 1,
+      "loss": 5.112833023071289
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_103_0001-0001.wav",
+      "epoch": 1,
+      "loss": 5.07013463973999
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_159_0014-0015.wav",
+      "epoch": 1,
+      "loss": 5.0612616539001465
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_035_0027-0027.wav",
+      "epoch": 1,
+      "loss": 4.940461158752441
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_127_0011-0012.wav",
+      "epoch": 1,
+      "loss": 4.874351501464844
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_153_0001-0002.wav",
+      "epoch": 1,
+      "loss": 4.808505058288574
+    },
+    {
+      "audio_path": "processed_indonesia/first_full_run_gpu/01_segments/jember_048_0017-0017.wav",
+      "epoch": 1,
+      "loss": 4.806686878204346
+    }
+  ],
+  "saved_at": "2026-09-06T00:56:57+00:00"
+}
