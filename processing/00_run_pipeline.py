@@ -138,6 +138,16 @@ def main() -> None:
         default=1.0,
         help="Fraction of stage-2 rows that receive additive-noise copies.",
     )
+    parser.add_argument(
+        "--jember-augmentation-multiplier",
+        type=float,
+        help="Additional stage-3 noisy copies per Jember original.",
+    )
+    parser.add_argument(
+        "--development-augmentation-multiplier",
+        type=float,
+        help="Additional stage-3 noisy copies per Indonesian-dev original.",
+    )
     parser.add_argument("--min-noise-fraction", type=float, default=0.25)
     parser.add_argument("--max-noise-fraction", type=float, default=0.75)
     parser.add_argument("--min-snr-db", type=float, default=5.0)
@@ -251,6 +261,16 @@ def main() -> None:
         "--seed", str(args.augmentation_seed),
         "--workers", str(args.augment_workers),
     ]
+    if args.jember_augmentation_multiplier is not None:
+        stage_3_args += [
+            "--jember-augmentation-multiplier",
+            str(args.jember_augmentation_multiplier),
+        ]
+    if args.development_augmentation_multiplier is not None:
+        stage_3_args += [
+            "--development-augmentation-multiplier",
+            str(args.development_augmentation_multiplier),
+        ]
     run("03_augment_audio_with_noise.py", stage_3_args)
 
     # Stage 5: Whisper LoRA fine-tuning. The train section of the same YAML is

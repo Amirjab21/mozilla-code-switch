@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import random
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -78,6 +79,61 @@ def select_rows_for_augmentation(
     count = int(len(rows) * fraction + 0.5)
     selected_indices = set(random.Random(seed).sample(range(len(rows)), count))
     return [row for index, row in enumerate(rows) if index in selected_indices]
+
+
+def dataset_name(row: dict[str, str]) -> str:
+    """Map stage-2 dataset labels to the two configurable augmentation groups."""
+    value = row.get("dataset", "").strip().lower()
+    if value == "jember":
+        return "jember"
+    if value in {"indonesian_development", "indonesian_dev", "development"}:
+        return "indonesian_dev"
+    raise ValueError(
+        f"Unsupported dataset label {row.get('dataset')!r} for "
+        f"{row.get('audio_path', '<unknown audio>')}"
+    )
+
+
+def dataset_augmentation_copy_counts(
+    rows: list[dict[str, str]],
+    jember_multiplier: float,
+    development_multiplier: float,
+    seed: int,
+) -> list[tuple[dict[str, str], int]]:
+    """Return additional-copy counts, including deterministic fractions.
+
+    The integer part of a multiplier is emitted for every row in that dataset.
+    For its fractional part, an exact rounded fraction of rows receives one
+    additional copy. Thus 5.0 means five noisy copies per original, while 0.5
+    means one noisy copy for half of the originals.
+    """
+    grouped: dict[str, list[dict[str, str]]] = {
+        "jember": [],
+        "indonesian_dev": [],
+    }
+    for row in rows:
+        grouped[dataset_name(row)].append(row)
+
+    multipliers = {
+        "jember": jember_multiplier,
+        "indonesian_dev": development_multiplier,
+    }
+    extra_paths: dict[str, set[str]] = {}
+    for offset, name in enumerate(("jember", "indonesian_dev"), start=1):
+        fraction = multipliers[name] - math.floor(multipliers[name])
+        selected = select_rows_for_augmentation(
+            grouped[name], fraction, seed + offset
+        ) if fraction else []
+        extra_paths[name] = {row["audio_path"] for row in selected}
+
+    planned = []
+    for row in rows:
+        name = dataset_name(row)
+        copies = math.floor(multipliers[name])
+        if row["audio_path"] in extra_paths[name]:
+            copies += 1
+        planned.append((row, copies))
+    return planned
 
 
 def random_noise_region(
@@ -211,6 +267,19 @@ def main() -> None:
         default=1.0,
         help="Fraction of eligible clean rows that receive augmented copies.",
     )
+    parser.add_argument(
+        "--jember-augmentation-multiplier",
+        type=float,
+        help=(
+            "Additional noisy copies per Jember original; fractions select a "
+            "deterministic subset (for example, 0.5 augments half once)."
+        ),
+    )
+    parser.add_argument(
+        "--development-augmentation-multiplier",
+        type=float,
+        help="Additional noisy copies per Indonesian-development original.",
+    )
     parser.add_argument("--min-noise-fraction", type=float, default=0.25)
     parser.add_argument("--max-noise-fraction", type=float, default=0.75)
     parser.add_argument("--min-snr-db", type=float, default=5.0)
@@ -234,6 +303,17 @@ def main() -> None:
         parser.error("--copies-per-clip must be at least 1")
     if not 0 <= args.augmentation_fraction <= 1:
         parser.error("--augmentation-fraction must be between 0 and 1")
+    dataset_multipliers = (
+        args.jember_augmentation_multiplier,
+        args.development_augmentation_multiplier,
+    )
+    if (dataset_multipliers[0] is None) != (dataset_multipliers[1] is None):
+        parser.error(
+            "Use --jember-augmentation-multiplier and "
+            "--development-augmentation-multiplier together"
+        )
+    if any(value is not None and value < 0 for value in dataset_multipliers):
+        parser.error("Dataset augmentation multipliers cannot be negative")
     if not 0 < args.min_noise_fraction <= args.max_noise_fraction <= 1:
         parser.error("Noise fractions must satisfy 0 < min <= max <= 1")
     if args.min_snr_db > args.max_snr_db:
@@ -255,9 +335,24 @@ def main() -> None:
     clean_rows: list[dict[str, str]] = []
     augmented_rows: list[dict[str, str]] = []
     eligible_rows = rows if args.limit is None else rows[: args.limit]
-    rows_to_augment = select_rows_for_augmentation(
-        eligible_rows, args.augmentation_fraction, args.seed
-    )
+    multiplier_mode = dataset_multipliers[0] is not None
+    if multiplier_mode:
+        try:
+            row_copy_counts = dataset_augmentation_copy_counts(
+                eligible_rows,
+                args.jember_augmentation_multiplier,
+                args.development_augmentation_multiplier,
+                args.seed,
+            )
+        except ValueError as error:
+            parser.error(str(error))
+    else:
+        rows_to_augment = select_rows_for_augmentation(
+            eligible_rows, args.augmentation_fraction, args.seed
+        )
+        row_copy_counts = [
+            (row, args.copies_per_clip) for row in rows_to_augment
+        ]
     for row in rows:
         clean = dict(row)
         clean.update({
@@ -271,8 +366,8 @@ def main() -> None:
         clean_rows.append(clean)
     seed_rng = random.Random(args.seed)
     jobs: list[AugmentationJob] = []
-    for row in rows_to_augment:
-        for copy_number in range(1, args.copies_per_clip + 1):
+    for row, copy_count in row_copy_counts:
+        for copy_number in range(1, copy_count + 1):
             jobs.append(AugmentationJob(
                 row=row,
                 output_dir=args.output_dir,
@@ -309,10 +404,16 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(clean_rows)
         writer.writerows(augmented_rows)
+    selection_description = (
+        f"Jember {args.jember_augmentation_multiplier:g}x additional, "
+        f"Indonesian dev {args.development_augmentation_multiplier:g}x additional"
+        if multiplier_mode else
+        f"{args.augmentation_fraction:.1%} augmentation selection"
+    )
     print(
         f"Wrote {len(clean_rows)} clean + {len(augmented_rows)} augmented rows "
         f"to {args.output} using {len(noise_files)} noise files "
-        f"({args.augmentation_fraction:.1%} augmentation selection, "
+        f"({selection_description}, "
         f"{args.workers} worker{'s' if args.workers != 1 else ''})"
     )
     link = viewer_url(args.output)

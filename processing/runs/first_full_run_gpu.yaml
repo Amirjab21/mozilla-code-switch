@@ -18,8 +18,8 @@ pipeline:
   start_match_model: indonesian-nlp/wav2vec2-indonesian-javanese-sundanese
   start_match_device: cuda
   noise_dir: indonesian_data/room_noises
-  noise_copies_per_clip: 1
-  noise_augmentation_fraction: 0.2
+  jember_augmentation_multiplier: 0.5
+  development_augmentation_multiplier: 5.0
   min_noise_fraction: 0.25
   max_noise_fraction: 0.75
   min_snr_db: 5.0
@@ -53,8 +53,8 @@ augment:
   output: processed_indonesia/first_full_run_gpu/03_dataset_with_augmented.csv
   output_dir: processed_indonesia/first_full_run_gpu/03_augmented_audio
   noise_dir: indonesian_data/room_noises
-  copies_per_clip: 1
-  augmentation_fraction: 0.2
+  jember_augmentation_multiplier: 0.5
+  development_augmentation_multiplier: 5.0
   min_noise_fraction: 0.25
   max_noise_fraction: 0.75
   min_snr_db: 5.0
@@ -64,7 +64,7 @@ augment:
 
 train:
   manifest: processed_indonesia/first_full_run_gpu/03_dataset_with_augmented.csv
-  output_dir: processed_indonesia/first_full_run_gpu/05_whisper_small
+  output_dir: processed_indonesia/first_full_run_gpu/05_whisper_small_dataset_multipliers
   base_model: small
   language: id
   epochs: 10
@@ -80,5 +80,5 @@ train:
   eval_every_steps: 600
   device: cuda
   wandb_project: indonesian-whisper-small-lora
-  wandb_run_name: first-full-run-gpu
+  wandb_run_name: first-full-run-gpu-dataset-multipliers
   wandb_mode: online
