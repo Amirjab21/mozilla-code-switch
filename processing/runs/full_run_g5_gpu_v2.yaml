@@ -1,0 +1,85 @@
+# LoRA-capacity ablation of full_run_g5_gpu.
+# Stages 01-03 deliberately reuse the v1 processed dataset so the training
+# comparison changes only LoRA rank, alpha, and dropout.
+run_name: full_run_g5_gpu_v2
+
+pipeline:
+  output_dir: processed_indonesia/full_run_g5_gpu
+  min_clip_seconds: 3.0
+  max_clip_seconds: 30.0
+  min_words: 2
+  jember_stride_overlap_rows: 1
+  prepare_workers: 8
+  reuse_existing: true
+  audio_seconds: 5.0
+  word_search_amount: 13
+  match_words: 2
+  closeness_metric: levenshtein
+  start_match_model: indonesian-nlp/wav2vec2-indonesian-javanese-sundanese
+  start_match_device: cuda
+  noise_dir: indonesian_data/room_noises
+  jember_augmentation_multiplier: 0.1
+  development_augmentation_multiplier: 10.0
+  min_noise_fraction: 0.25
+  max_noise_fraction: 0.75
+  min_snr_db: 5.0
+  max_snr_db: 20.0
+  augmentation_seed: 1337
+  augment_workers: 16
+
+prepare:
+  output_dir: processed_indonesia/full_run_g5_gpu/01_segments
+  manifest: processed_indonesia/full_run_g5_gpu/01_segments.csv
+  min_clip_seconds: 3.0
+  max_clip_seconds: 30.0
+  min_words: 2
+  jember_stride_overlap_rows: 1
+  prepare_workers: 8
+  reuse_existing: true
+
+match:
+  clips: processed_indonesia/full_run_g5_gpu/01_segments.csv
+  output: processed_indonesia/full_run_g5_gpu/clip_start_matches.json
+  output_csv: processed_indonesia/full_run_g5_gpu/02_processed.csv
+  audio_seconds: 5.0
+  word_search_amount: 13
+  match_words: 2
+  closeness_metric: levenshtein
+  model: indonesian-nlp/wav2vec2-indonesian-javanese-sundanese
+  device: cuda
+
+augment:
+  input: processed_indonesia/full_run_g5_gpu/02_processed.csv
+  output: processed_indonesia/full_run_g5_gpu/03_dataset_with_augmented.csv
+  output_dir: processed_indonesia/full_run_g5_gpu/03_augmented_audio
+  noise_dir: indonesian_data/room_noises
+  jember_augmentation_multiplier: 0.5
+  development_augmentation_multiplier: 5.0
+  min_noise_fraction: 0.25
+  max_noise_fraction: 0.75
+  min_snr_db: 5.0
+  max_snr_db: 20.0
+  seed: 1337
+  workers: 16
+
+train:
+  manifest: processed_indonesia/full_run_g5_gpu/03_dataset_with_augmented.csv
+  output_dir: processed_indonesia/full_run_g5_gpu/05_whisper_small_lora_r32_a64_d005
+  base_model: small
+  language: id
+  epochs: 10
+  batch_size: 8
+  num_workers: 8
+  jember_train_fraction: 0.5
+  lora_rank: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  eval_indonesian_dev_speakers: "5,7"
+  eval_other_indonesian_dev_clips_per_speaker: 5
+  eval_every_steps: 600
+  device: cuda
+  wandb_project: indonesian-whisper-small-lora
+  wandb_run_name: full-run-g5-gpu-r32-a64-drophalfjember
+  wandb_mode: online

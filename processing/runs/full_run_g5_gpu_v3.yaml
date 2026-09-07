@@ -1,0 +1,40 @@
+# Dataset-balance ablation using the existing full_run_g5_gpu stage-2 output.
+# Indonesian-dev receives two noisy copies per original, while training retains
+# only a deterministic 10% sample of the Jember rows.
+run_name: full_run_g5_gpu_v3
+
+augment:
+  input: processed_indonesia/full_run_g5_gpu/02_processed.csv
+  output: processed_indonesia/full_run_g5_gpu/03_dataset_with_augmented_v3.csv
+  output_dir: processed_indonesia/full_run_g5_gpu/03_augmented_audio_v3
+  noise_dir: indonesian_data/room_noises
+  jember_augmentation_multiplier: 0.1
+  development_augmentation_multiplier: 2.0
+  min_noise_fraction: 0.25
+  max_noise_fraction: 0.75
+  min_snr_db: 5.0
+  max_snr_db: 20.0
+  seed: 1337
+  workers: 8
+
+train:
+  manifest: processed_indonesia/full_run_g5_gpu/03_dataset_with_augmented_v3.csv
+  output_dir: processed_indonesia/full_run_g5_gpu/05_whisper_small_v3
+  base_model: small
+  language: id
+  epochs: 10
+  batch_size: 8
+  num_workers: 8
+  jember_train_fraction: 0.1
+  lora_rank: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  eval_indonesian_dev_speakers: "5,7"
+  eval_other_indonesian_dev_clips_per_speaker: 5
+  eval_every_steps: 100
+  device: cuda
+  wandb_project: indonesian-whisper-small-lora
+  wandb_run_name: full-run-g5-gpu-v3
+  wandb_mode: online

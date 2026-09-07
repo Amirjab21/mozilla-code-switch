@@ -264,6 +264,25 @@ def split_preview_rows(
     return rows[:-test_size], rows[-test_size:]
 
 
+def subsample_jember_training_rows(
+    rows: list[dict[str, str]], fraction: float, seed: int
+) -> tuple[list[dict[str, str]], int, int]:
+    """Randomly retain an exact fraction of Jember rows, preserving row order."""
+    jember_indices = [
+        index for index, row in enumerate(rows) if row.get("dataset") == "jember"
+    ]
+    keep_count = round(len(jember_indices) * fraction)
+    kept_jember_indices = set(
+        random.Random(seed).sample(jember_indices, keep_count)
+    )
+    filtered = [
+        row
+        for index, row in enumerate(rows)
+        if row.get("dataset") != "jember" or index in kept_jember_indices
+    ]
+    return filtered, len(jember_indices), keep_count
+
+
 def split_balanced_dataset_evaluation(
     rows: list[dict[str, str]],
     development_count: int,
@@ -897,6 +916,16 @@ def main() -> None:
     parser.add_argument("--download-root", type=Path, default=Path("models/whisper"))
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument(
+        "--jember-train-fraction",
+        type=float,
+        default=1.0,
+        help=(
+            "Fraction of Jember training rows retained after constructing the "
+            "evaluation split. 0 excludes all Jember training rows. "
+            "Indonesian-dev and evaluation rows are unchanged."
+        ),
+    )
     parser.add_argument("--max-samples", type=int, help="Use a deterministic subset of this many manifest rows for a preview run.")
     parser.add_argument("--max-train-steps", type=int, help="Stop after this many optimizer steps, while still running final evaluation and checkpointing.")
     parser.add_argument("--learning-rate", type=float, default=1e-5)
@@ -933,6 +962,8 @@ def main() -> None:
         parser.error("--max-train-steps must be positive")
     if args.eos_loss_weight <= 0:
         parser.error("--eos-loss-weight must be positive")
+    if not 0 <= args.jember_train_fraction <= 1:
+        parser.error("--jember-train-fraction must be between 0 and 1 inclusive")
     if args.eval_indonesian_dev_clips < 0 or args.eval_jember_clips < 0:
         parser.error("Balanced evaluation clip counts cannot be negative")
     if args.eval_other_indonesian_dev_clips_per_speaker < 0:
@@ -1013,6 +1044,17 @@ def main() -> None:
         train_rows, test_rows, split_unit = split_rows(rows, args.seed)
     else:
         train_rows, test_rows, split_unit = split_rows(rows, args.seed)
+    if args.jember_train_fraction < 1:
+        train_rows, original_jember_count, retained_jember_count = (
+            subsample_jember_training_rows(
+                train_rows, args.jember_train_fraction, args.seed + 10_000
+            )
+        )
+        print(
+            f"Jember training filter retained {retained_jember_count}/"
+            f"{original_jember_count} rows "
+            f"({args.jember_train_fraction:.1%}); evaluation rows unchanged"
+        )
     if not train_rows or not test_rows:
         raise RuntimeError("The split produced an empty train or test partition")
     # A speaker-defined evaluation set is exact: do not silently truncate the
