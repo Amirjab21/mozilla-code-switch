@@ -1,0 +1,98 @@
+{
+  "epoch": 1,
+  "completed_epochs": 0,
+  "batch_in_epoch": 450,
+  "batches_per_epoch": 4317,
+  "epoch_progress": 0.10423905489923559,
+  "global_step": 450,
+  "configured_epochs": 10,
+  "batch_size": 2,
+  "seed": 1337,
+  "training_clips": 8633,
+  "best_eval_loss": 0.5049779665035506,
+  "best_eval_wer": 0.17159605648814283,
+  "current_loss_heap": [
+    [
+      2.0238959789276123,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_030_0103-0104.wav"
+    ],
+    [
+      2.0344552993774414,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_162_0007-0009.wav"
+    ],
+    [
+      2.0285496711730957,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_042_0056-0058.wav"
+    ],
+    [
+      2.0752856731414795,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_044_0069-0072.wav"
+    ],
+    [
+      2.1334125995635986,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_157_0001-0004.wav"
+    ],
+    [
+      2.046241283416748,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_042_0100-0103.wav"
+    ],
+    [
+      2.1654164791107178,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_194_0004-0005.wav"
+    ],
+    [
+      2.0759458541870117,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_207_0004-0005.wav"
+    ],
+    [
+      2.1108474731445312,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_092_0001-0002.wav"
+    ],
+    [
+      2.158724069595337,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_105_0011-0012.wav"
+    ],
+    [
+      2.948805093765259,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_174_0011-0012.wav"
+    ],
+    [
+      2.701472520828247,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_126_0003-0003.wav"
+    ],
+    [
+      2.3578860759735107,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_136_0001-0004.wav"
+    ],
+    [
+      2.293579339981079,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_029_0059-0059.wav"
+    ],
+    [
+      3.834834337234497,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_035_0009-0009.wav"
+    ],
+    [
+      5.4908905029296875,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_035_0027-0027.wav"
+    ],
+    [
+      3.713178873062134,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_035_0011-0011.wav"
+    ],
+    [
+      2.1399989128112793,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_029_0052-0053.wav"
+    ],
+    [
+      2.717724084854126,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_035_0036-0036.wav"
+    ],
+    [
+      2.5467817783355713,
+      "processed_indonesia/full_run_g5_whisper_medium/01_segments/jember_112_0042-0044.wav"
+    ]
+  ],
+  "completed_high_losses": [],
+  "saved_at": "2026-09-06T14:22:38+00:00"
+}

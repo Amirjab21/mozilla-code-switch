@@ -1,0 +1,24 @@
+# Training-only Whisper Turbo run using the existing processed and augmented
+# dataset produced by full_run_g5_whisper_medium.yaml.
+run_name: full_run_g5_whisper_large
+
+train:
+  manifest: processed_indonesia/full_run_g5_whisper_medium/03_dataset_with_augmented.csv
+  output_dir: processed_indonesia/full_run_g5_whisper_medium/05_whisper_large
+  base_model: large-v3
+  language: id
+  epochs: 10
+  batch_size: 2
+  num_workers: 8
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.0
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  eval_indonesian_dev_speakers: "5,7"
+  eval_other_indonesian_dev_clips_per_speaker: 2
+  eval_every_steps: 450
+  device: cuda
+  wandb_project: indonesian-whisper-medium-lora
+  wandb_run_name: full-run-g5-whisper-large
+  wandb_mode: online

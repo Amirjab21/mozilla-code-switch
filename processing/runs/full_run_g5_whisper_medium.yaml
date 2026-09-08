@@ -82,7 +82,7 @@ train:
   base_model: medium
   language: id
   epochs: 10
-  batch_size: 12
+  batch_size: 6
   num_workers: 8
   lora_rank: 16
   lora_alpha: 32
