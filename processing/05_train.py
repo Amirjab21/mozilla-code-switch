@@ -16,7 +16,7 @@ import random
 import re
 import shutil
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1024,6 +1024,7 @@ def main() -> None:
         ),
     )
     parser.add_argument("--commonvoice-percentage", type=float, default=0.0)
+    parser.add_argument("--jember-max-training-clips", type=int, help="Retain at most this many Jember training rows while keeping every non-Jember row.")
     parser.add_argument("--max-samples", type=int, help="Use a deterministic subset of this many manifest rows for a preview run.")
     parser.add_argument("--max-train-steps", type=int, help="Stop after this many optimizer steps, while still running final evaluation and checkpointing.")
     parser.add_argument("--learning-rate", type=float, default=1e-5)
@@ -1078,6 +1079,10 @@ def main() -> None:
         parser.error("--commonvoice-percentage must be between 0 and 100")
     if args.jember_percentage is not None and args.jember_percentage + args.commonvoice_percentage > 100:
         parser.error("--jember-percentage plus --commonvoice-percentage cannot exceed 100")
+    if args.jember_max_training_clips is not None and args.jember_max_training_clips < 1:
+        parser.error("--jember-max-training-clips must be positive")
+    if args.jember_max_training_clips is not None and args.jember_percentage is not None:
+        parser.error("--jember-max-training-clips cannot be combined with --jember-percentage")
     if args.eval_indonesian_dev_clips < 0 or args.eval_jember_clips < 0:
         parser.error("Balanced evaluation clip counts cannot be negative")
     proportional_evaluation_requested = (
@@ -1198,6 +1203,14 @@ def main() -> None:
             f"{original_jember_count} Jember rows; achieved "
             f"{achieved_percentage:.2f}% (target {args.jember_percentage:g}%)"
         )
+    elif args.jember_max_training_clips is not None:
+        jember_rows = [row for row in train_rows if row.get("dataset") == "jember"]
+        retained = random.Random(args.seed + 10_000).sample(
+            jember_rows, min(args.jember_max_training_clips, len(jember_rows))
+        )
+        retained_paths = {row["audio_path"] for row in retained}
+        train_rows = [row for row in train_rows if row.get("dataset") != "jember" or row["audio_path"] in retained_paths]
+        print(f"Jember training cap retained {len(retained)}/{len(jember_rows)} rows; all Common Voice and Indonesian-development rows were retained")
     if not train_rows or not test_rows:
         raise RuntimeError("The split produced an empty train or test partition")
     dataset_labels = (
