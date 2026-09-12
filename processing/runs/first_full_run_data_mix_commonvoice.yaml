@@ -52,6 +52,21 @@ prepare:
   prepare_workers: 16
   reuse_existing: true
 
+augment:
+  input: processed_indonesia/first_full_run_data_mix_commonvoice/02_processed.csv
+  output: processed_indonesia/first_full_run_data_mix_commonvoice/03_dataset_with_augmented.csv
+  output_dir: processed_indonesia/first_full_run_data_mix_commonvoice/03_augmented_audio
+  noise_dir: indonesian_data/room_noises
+  jember_augmentation_multiplier: 0.1
+  development_augmentation_multiplier: 2.0
+  commonvoice_augmentation_multiplier: 0.5
+  min_noise_fraction: 0.25
+  max_noise_fraction: 0.75
+  min_snr_db: 5.0
+  max_snr_db: 20.0
+  seed: 1337
+  workers: 16
+
 train:
   manifest: processed_indonesia/first_full_run_data_mix_commonvoice/03_dataset_with_augmented.csv
   output_dir: processed_indonesia/first_full_run_data_mix_commonvoice/05_train
@@ -68,10 +83,10 @@ train:
   device: cuda
   eval_decode_batch_size: 4
   eval_total_clips: 150
-  jember_percentage: 40
-  commonvoice_percentage: 40
-  eval_jember_proportion: 40
-  eval_commonvoice_proportion: 40
+  jember_percentage: 25
+  commonvoice_percentage: 35
+  eval_jember_proportion: 25
+  eval_commonvoice_proportion: 35
   eval_every_steps: 600
   wandb_project: indonesian-whisper-medium-lora
   wandb_run_name: first-full-run-data-mix-commonvoice
