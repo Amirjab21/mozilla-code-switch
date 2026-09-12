@@ -1,8 +1,8 @@
-# Keep all Common Voice and Indonesian-development rows; cap Jember at 800 rows.
-run_name: first_full_run_data_mix_commonvoice_jember_800
+# Keep all Common Voice and Indonesian-development rows; cap Jember at 1200 rows.
+run_name: first_full_run_data_mix_commonvoice_jember_1200
 
 pipeline:
-  output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_800
+  output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200
   min_clip_seconds: 6.0
   max_clip_seconds: 30.0
   jember_min_clip_seconds: 10.0
@@ -36,8 +36,8 @@ pipeline:
   augment_workers: 16
 
 prepare:
-  output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_800/01_segments
-  manifest: processed_indonesia/first_full_run_data_mix_commonvoice_jember_800/01_segments.csv
+  output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/01_segments
+  manifest: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/01_segments.csv
   commonvoice-clips-per-dataset: 300
   commonvoice-code-switch-samples: 2000
   commonvoice-seed: 1337
@@ -53,9 +53,9 @@ prepare:
   reuse_existing: true
 
 augment:
-  input: processed_indonesia/first_full_run_data_mix_commonvoice_jember_800/02_processed.csv
-  output: processed_indonesia/first_full_run_data_mix_commonvoice_jember_800/03_dataset_with_augmented.csv
-  output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_800/03_augmented_audio
+  input: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/02_processed.csv
+  output: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/03_dataset_with_augmented.csv
+  output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/03_augmented_audio
   noise_dir: indonesian_data/room_noises
   jember_augmentation_multiplier: 0.1
   development_augmentation_multiplier: 2.0
@@ -68,8 +68,8 @@ augment:
   workers: 16
 
 train:
-  manifest: processed_indonesia/first_full_run_data_mix_commonvoice_jember_800/03_dataset_with_augmented.csv
-  output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_800/05_train
+  manifest: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/03_dataset_with_augmented.csv
+  output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/05_train
   base_model: large-v3
   language: id
   epochs: 10
@@ -88,5 +88,5 @@ train:
   eval_commonvoice_proportion: 35
   eval_every_steps: 600
   wandb_project: indonesian-whisper-medium-lora
-  wandb_run_name: first-full-run-data-mix-commonvoice-jember-800
+  wandb_run_name: first-full-run-data-mix-commonvoice-jember-1200
   wandb_mode: online
