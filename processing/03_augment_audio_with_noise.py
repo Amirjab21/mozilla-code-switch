@@ -86,8 +86,11 @@ def dataset_name(row: dict[str, str]) -> str:
     value = row.get("dataset", "").strip().lower()
     if value == "jember":
         return "jember"
-    if value in {"indonesian_development", "indonesian_dev", "development"}:
-        return "indonesian_dev"
+    if value in {
+        "indonesian_development", "indonesian_dev", "development",
+        "cv_indonesian", "cv_javanese", "commonvoice_code_switch",
+    }:
+        return "commonvoice" if value in {"cv_indonesian", "cv_javanese", "commonvoice_code_switch"} else "indonesian_dev"
     raise ValueError(
         f"Unsupported dataset label {row.get('dataset')!r} for "
         f"{row.get('audio_path', '<unknown audio>')}"
@@ -98,6 +101,7 @@ def dataset_augmentation_copy_counts(
     rows: list[dict[str, str]],
     jember_multiplier: float,
     development_multiplier: float,
+    commonvoice_multiplier: float,
     seed: int,
 ) -> list[tuple[dict[str, str], int]]:
     """Return additional-copy counts, including deterministic fractions.
@@ -110,6 +114,7 @@ def dataset_augmentation_copy_counts(
     grouped: dict[str, list[dict[str, str]]] = {
         "jember": [],
         "indonesian_dev": [],
+        "commonvoice": [],
     }
     for row in rows:
         grouped[dataset_name(row)].append(row)
@@ -117,9 +122,10 @@ def dataset_augmentation_copy_counts(
     multipliers = {
         "jember": jember_multiplier,
         "indonesian_dev": development_multiplier,
+        "commonvoice": commonvoice_multiplier,
     }
     extra_paths: dict[str, set[str]] = {}
-    for offset, name in enumerate(("jember", "indonesian_dev"), start=1):
+    for offset, name in enumerate(("jember", "indonesian_dev", "commonvoice"), start=1):
         fraction = multipliers[name] - math.floor(multipliers[name])
         selected = select_rows_for_augmentation(
             grouped[name], fraction, seed + offset
@@ -280,6 +286,7 @@ def main() -> None:
         type=float,
         help="Additional noisy copies per Indonesian-development original.",
     )
+    parser.add_argument("--commonvoice-augmentation-multiplier", type=float, help="Additional noisy copies per Common Voice or synthetic code-switch original.")
     parser.add_argument("--min-noise-fraction", type=float, default=0.25)
     parser.add_argument("--max-noise-fraction", type=float, default=0.75)
     parser.add_argument("--min-snr-db", type=float, default=5.0)
@@ -314,6 +321,8 @@ def main() -> None:
         )
     if any(value is not None and value < 0 for value in dataset_multipliers):
         parser.error("Dataset augmentation multipliers cannot be negative")
+    if args.commonvoice_augmentation_multiplier is not None and args.commonvoice_augmentation_multiplier < 0:
+        parser.error("--commonvoice-augmentation-multiplier cannot be negative")
     if not 0 < args.min_noise_fraction <= args.max_noise_fraction <= 1:
         parser.error("Noise fractions must satisfy 0 < min <= max <= 1")
     if args.min_snr_db > args.max_snr_db:
@@ -337,11 +346,13 @@ def main() -> None:
     eligible_rows = rows if args.limit is None else rows[: args.limit]
     multiplier_mode = dataset_multipliers[0] is not None
     if multiplier_mode:
+        commonvoice_multiplier = args.commonvoice_augmentation_multiplier if args.commonvoice_augmentation_multiplier is not None else args.development_augmentation_multiplier
         try:
             row_copy_counts = dataset_augmentation_copy_counts(
                 eligible_rows,
                 args.jember_augmentation_multiplier,
                 args.development_augmentation_multiplier,
+                commonvoice_multiplier,
                 args.seed,
             )
         except ValueError as error:
@@ -406,7 +417,8 @@ def main() -> None:
         writer.writerows(augmented_rows)
     selection_description = (
         f"Jember {args.jember_augmentation_multiplier:g}x additional, "
-        f"Indonesian dev {args.development_augmentation_multiplier:g}x additional"
+        f"Indonesian dev {args.development_augmentation_multiplier:g}x additional, "
+        f"Common Voice {commonvoice_multiplier:g}x additional"
         if multiplier_mode else
         f"{args.augmentation_fraction:.1%} augmentation selection"
     )

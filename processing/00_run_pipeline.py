@@ -62,6 +62,13 @@ def main() -> None:
     )
     parser.add_argument("--development-corrected-long-clips", type=Path)
     parser.add_argument("--development-corrected-long-audio-dir", type=Path)
+    parser.add_argument("--commonvoice-indonesian-manifest", type=Path, default=Path("indonesian_data/cv_indonesian/id/test.tsv"))
+    parser.add_argument("--commonvoice-indonesian-audio-dir", type=Path, default=Path("indonesian_data/cv_indonesian/id/clips"))
+    parser.add_argument("--commonvoice-javanese-manifest", type=Path, default=Path("indonesian_data/cv_javanese/ss-corpus-jv.tsv"))
+    parser.add_argument("--commonvoice-javanese-audio-dir", type=Path, default=Path("indonesian_data/cv_javanese/audios"))
+    parser.add_argument("--commonvoice-code-switch-samples", type=int)
+    parser.add_argument("--commonvoice-clips-per-dataset", type=int)
+    parser.add_argument("--commonvoice-seed", type=int, default=1337)
     parser.add_argument(
         "--output-dir", type=Path, default=Path("processed_indonesia")
     )
@@ -154,6 +161,7 @@ def main() -> None:
         type=float,
         help="Additional stage-3 noisy copies per Indonesian-dev original.",
     )
+    parser.add_argument("--commonvoice-augmentation-multiplier", type=float)
     parser.add_argument("--min-noise-fraction", type=float, default=0.25)
     parser.add_argument("--max-noise-fraction", type=float, default=0.75)
     parser.add_argument("--min-snr-db", type=float, default=5.0)
@@ -210,6 +218,11 @@ def main() -> None:
         "--jember-audio-dir", str(args.jember_audio_dir),
         "--development-manifest", str(args.development_manifest),
         "--development-audio-dir", str(args.development_audio_dir),
+        "--commonvoice-indonesian-manifest", str(args.commonvoice_indonesian_manifest),
+        "--commonvoice-indonesian-audio-dir", str(args.commonvoice_indonesian_audio_dir),
+        "--commonvoice-javanese-manifest", str(args.commonvoice_javanese_manifest),
+        "--commonvoice-javanese-audio-dir", str(args.commonvoice_javanese_audio_dir),
+        "--commonvoice-seed", str(args.commonvoice_seed),
         "--output-dir", str(args.output_dir / "01_segments"),
         "--manifest", str(segment_manifest),
         "--ffmpeg", args.ffmpeg,
@@ -233,6 +246,8 @@ def main() -> None:
         ("--jember-max-clip-seconds", args.jember_max_clip_seconds),
         ("--development-min-clip-seconds", args.development_min_clip_seconds),
         ("--development-max-clip-seconds", args.development_max_clip_seconds),
+        ("--commonvoice-code-switch-samples", args.commonvoice_code_switch_samples),
+        ("--commonvoice-clips-per-dataset", args.commonvoice_clips_per_dataset),
         ("--max-recordings", args.max_recordings),
         ("--max-segments-per-recording", args.max_segments_per_recording),
         ("--max-development-clips", args.max_development_clips),
@@ -289,6 +304,8 @@ def main() -> None:
             "--development-augmentation-multiplier",
             str(args.development_augmentation_multiplier),
         ]
+    if args.commonvoice_augmentation_multiplier is not None:
+        stage_3_args += ["--commonvoice-augmentation-multiplier", str(args.commonvoice_augmentation_multiplier)]
     run("03_augment_audio_with_noise.py", stage_3_args)
 
     # Stage 5: Whisper LoRA fine-tuning. The train section of the same YAML is

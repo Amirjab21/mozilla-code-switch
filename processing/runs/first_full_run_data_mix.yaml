@@ -1,0 +1,101 @@
+# Full SageMaker ml.g5.8xlarge run using Whisper medium.
+# No processing, dataset, or training limits are applied. Speed/pitch
+# augmentation is not configured and is not invoked by this pipeline.
+run_name: full_run_g5_whisper_medium
+
+pipeline:
+  output_dir: processed_indonesia/full_run_g5_whisper_medium
+  min_clip_seconds: 6.0
+  max_clip_seconds: 30.0
+  jember_min_clip_seconds: 10.0
+  jember_max_clip_seconds: 25.0
+  development_min_clip_seconds: 6.0
+  development_max_clip_seconds: 30.0
+  development_corrected_long_clips: indonesian_data/indonesian_dev/corrected_above30seconds_indonesian_dev.csv
+  development_corrected_long_audio_dir: indonesian_data/indonesian_dev/corrected_above30seconds_audio
+  min_words: 2
+  # Retain the last four rows of each longest window before expanding the
+  # next block. Shorter windows still advance by at least one row.
+  jember_stride_overlap_rows: 0
+  prepare_workers: 16
+  reuse_existing: true
+  audio_seconds: 5.0
+  word_search_amount: 13
+  match_words: 2
+  closeness_metric: levenshtein
+  start_match_model: indonesian-nlp/wav2vec2-indonesian-javanese-sundanese
+  start_match_device: cuda
+  noise_dir: indonesian_data/room_noises
+  jember_augmentation_multiplier: 0.1
+  development_augmentation_multiplier: 2.0
+  min_noise_fraction: 0.25
+  max_noise_fraction: 0.75
+  min_snr_db: 5.0
+  max_snr_db: 20.0
+  augmentation_seed: 1337
+  augment_workers: 16
+
+prepare:
+  output_dir: processed_indonesia/full_run_g5_whisper_medium/01_segments
+  manifest: processed_indonesia/full_run_g5_whisper_medium/01_segments.csv
+  min_clip_seconds: 6.0
+  max_clip_seconds: 30.0
+  jember_min_clip_seconds: 10.0
+  jember_max_clip_seconds: 25.0
+  development_min_clip_seconds: 6.0
+  development_max_clip_seconds: 30.0
+  development_corrected_long_clips: indonesian_data/indonesian_dev/corrected_above30seconds_indonesian_dev.csv
+  development_corrected_long_audio_dir: indonesian_data/indonesian_dev/corrected_above30seconds_audio
+  min_words: 2
+  jember_stride_overlap_rows: 0
+  prepare_workers: 16
+  reuse_existing: true
+
+match:
+  clips: processed_indonesia/full_run_g5_whisper_medium/01_segments.csv
+  output: processed_indonesia/full_run_g5_whisper_medium/clip_start_matches.json
+  output_csv: processed_indonesia/full_run_g5_whisper_medium/02_processed.csv
+  audio_seconds: 5.0
+  word_search_amount: 13
+  match_words: 2
+  closeness_metric: levenshtein
+  model: indonesian-nlp/wav2vec2-indonesian-javanese-sundanese
+  device: cuda
+
+augment:
+  input: processed_indonesia/full_run_g5_whisper_medium/02_processed.csv
+  output: processed_indonesia/full_run_g5_whisper_medium/03_dataset_with_augmented.csv
+  output_dir: processed_indonesia/full_run_g5_whisper_medium/03_augmented_audio
+  noise_dir: indonesian_data/room_noises
+  jember_augmentation_multiplier: 0.1
+  development_augmentation_multiplier: 2.0
+  min_noise_fraction: 0.25
+  max_noise_fraction: 0.75
+  min_snr_db: 5.0
+  max_snr_db: 20.0
+  seed: 1337
+  workers: 16
+
+train:
+  manifest: processed_indonesia/full_run_g5_whisper_medium/03_dataset_with_augmented.csv
+  output_dir: processed_indonesia/full_run_g5_whisper_medium/full_run_data_mix
+  base_model: large-v3
+  language: id
+  epochs: 10
+  batch_size: 2
+  num_workers: 8
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.1
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  device: cuda
+  eval_decode_batch_size: 4
+  eval_total_clips: 150
+  jember_percentage: 70
+  eval_jember_proportion: 70
+  eval_every_steps: 600
+  device: cuda
+  wandb_project: indonesian-whisper-medium-lora
+  wandb_run_name: full-run-g5-whisper-medium
+  wandb_mode: online

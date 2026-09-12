@@ -339,6 +339,38 @@ def balance_jember_training_percentage(
     return filtered, original_count, retained_count
 
 
+def composition_bucket(row: dict[str, str]) -> str:
+    """Map source dataset labels into Jember, Common Voice, or development."""
+    dataset = row.get("dataset", "")
+    if dataset == "jember":
+        return "jember"
+    if dataset in {"cv_indonesian", "cv_javanese", "commonvoice_code_switch"}:
+        return "commonvoice"
+    if dataset == "indonesian_development":
+        return "indonesian_development"
+    raise ValueError(f"Unsupported dataset for composition: {dataset!r}")
+
+
+def balance_training_composition(rows: list[dict[str, str]], jember: float, commonvoice: float, seed: int) -> list[dict[str, str]]:
+    """Downsample the three source buckets to the requested row composition."""
+    requested = {"jember": jember, "commonvoice": commonvoice, "indonesian_development": 100 - jember - commonvoice}
+    groups: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in rows:
+        groups[composition_bucket(row)].append(row)
+    active = {name: percent for name, percent in requested.items() if percent > 0}
+    missing = [name for name in active if not groups[name]]
+    if missing:
+        raise ValueError(f"Requested composition has no rows for: {', '.join(missing)}")
+    total = min(len(groups[name]) * 100 / percent for name, percent in active.items())
+    selected: list[dict[str, str]] = []
+    for offset, name in enumerate(("jember", "commonvoice", "indonesian_development")):
+        candidates = groups[name][:]
+        random.Random(seed + offset).shuffle(candidates)
+        selected.extend(candidates[:round(total * requested[name] / 100)])
+    random.Random(seed).shuffle(selected)
+    return selected
+
+
 def split_balanced_dataset_evaluation(
     rows: list[dict[str, str]],
     development_count: int,
@@ -385,6 +417,7 @@ def split_proportional_augmented_evaluation(
     rows: list[dict[str, str]],
     total_clips: int,
     jember_proportion: float,
+    commonvoice_proportion: float,
     seed: int,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]], int, int]:
     """Select an exact mixed-dataset eval set from the augmented row pool.
@@ -394,9 +427,11 @@ def split_proportional_augmented_evaluation(
     clip and its noisy copies leaking across the split.
     """
     jember_count = round(total_clips * jember_proportion / 100)
-    development_count = total_clips - jember_count
+    commonvoice_count = round(total_clips * commonvoice_proportion / 100)
+    development_count = total_clips - jember_count - commonvoice_count
     requested = {
         "jember": jember_count,
+        "commonvoice": commonvoice_count,
         "indonesian_development": development_count,
     }
     rng = random.Random(seed)
@@ -404,7 +439,7 @@ def split_proportional_augmented_evaluation(
     for dataset, count in requested.items():
         if count == 0:
             continue
-        candidates = [row for row in rows if row.get("dataset") == dataset]
+        candidates = [row for row in rows if composition_bucket(row) == dataset]
         rng.shuffle(candidates)
         dataset_selected: list[dict[str, str]] = []
         seen_families: set[str] = set()
@@ -431,7 +466,7 @@ def split_proportional_augmented_evaluation(
     ]
     if not train:
         raise ValueError("Proportional evaluation split left no training clips")
-    return train, selected, jember_count, development_count
+    return train, selected, jember_count, commonvoice_count, development_count
 
 
 def recording_key(row: dict[str, str]) -> str:
@@ -972,6 +1007,7 @@ def main() -> None:
             "60 means 60%% Jember and 40%% Indonesian-dev."
         ),
     )
+    parser.add_argument("--eval-commonvoice-proportion", type=float, default=0.0)
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
@@ -987,6 +1023,7 @@ def main() -> None:
             "Omit this argument to retain the complete training split."
         ),
     )
+    parser.add_argument("--commonvoice-percentage", type=float, default=0.0)
     parser.add_argument("--max-samples", type=int, help="Use a deterministic subset of this many manifest rows for a preview run.")
     parser.add_argument("--max-train-steps", type=int, help="Stop after this many optimizer steps, while still running final evaluation and checkpointing.")
     parser.add_argument("--learning-rate", type=float, default=1e-5)
@@ -1037,6 +1074,10 @@ def main() -> None:
         parser.error("--adapter-dir can only be used with --eval-only")
     if args.jember_percentage is not None and not 0 <= args.jember_percentage <= 100:
         parser.error("--jember-percentage must be between 0 and 100")
+    if not 0 <= args.commonvoice_percentage <= 100:
+        parser.error("--commonvoice-percentage must be between 0 and 100")
+    if args.jember_percentage is not None and args.jember_percentage + args.commonvoice_percentage > 100:
+        parser.error("--jember-percentage plus --commonvoice-percentage cannot exceed 100")
     if args.eval_indonesian_dev_clips < 0 or args.eval_jember_clips < 0:
         parser.error("Balanced evaluation clip counts cannot be negative")
     proportional_evaluation_requested = (
@@ -1056,6 +1097,10 @@ def main() -> None:
         and not 0 <= args.eval_jember_proportion <= 100
     ):
         parser.error("--eval-jember-proportion must be between 0 and 100")
+    if not 0 <= args.eval_commonvoice_proportion <= 100:
+        parser.error("--eval-commonvoice-proportion must be between 0 and 100")
+    if args.eval_jember_proportion is not None and args.eval_jember_proportion + args.eval_commonvoice_proportion > 100:
+        parser.error("Evaluation Jember and Common Voice proportions cannot exceed 100")
     if bool(args.eval_indonesian_dev_clips) != bool(args.eval_jember_clips):
         parser.error(
             "Use --eval-indonesian-dev-clips and --eval-jember-clips together"
@@ -1099,15 +1144,18 @@ def main() -> None:
             train_rows,
             test_rows,
             evaluation_jember_count,
+            evaluation_commonvoice_count,
             evaluation_development_count,
         ) = split_proportional_augmented_evaluation(
             rows,
             args.eval_total_clips,
             args.eval_jember_proportion,
+            args.eval_commonvoice_proportion,
             args.seed,
         )
         split_unit = (
             f"post-augmentation rows ({evaluation_jember_count} Jember, "
+            f"{evaluation_commonvoice_count} Common Voice, "
             f"{evaluation_development_count} Indonesian-development; "
             "augmentation families held entirely out)"
         )
@@ -1129,7 +1177,10 @@ def main() -> None:
         train_rows, test_rows, split_unit = split_rows(rows, args.seed)
     else:
         train_rows, test_rows, split_unit = split_rows(rows, args.seed)
-    if args.jember_percentage is not None:
+    if args.jember_percentage is not None and args.commonvoice_percentage:
+        train_rows = balance_training_composition(train_rows, args.jember_percentage, args.commonvoice_percentage, args.seed + 10_000)
+        print(f"Training composition selected: Jember={args.jember_percentage:g}%, Common Voice={args.commonvoice_percentage:g}%, Indonesian-dev={100-args.jember_percentage-args.commonvoice_percentage:g}%")
+    elif args.jember_percentage is not None:
         train_rows, original_jember_count, retained_jember_count = (
             balance_jember_training_percentage(
                 train_rows, args.jember_percentage, args.seed + 10_000
@@ -1149,6 +1200,32 @@ def main() -> None:
         )
     if not train_rows or not test_rows:
         raise RuntimeError("The split produced an empty train or test partition")
+    dataset_labels = (
+        "indonesian_development", "indonesian_dev", "development",
+        "cv_indonesian", "cv_javanese", "commonvoice_code_switch",
+    )
+    distribution = Counter(row.get("dataset", "") for row in train_rows)
+    print("Training dataset distribution before model initialization:")
+    for label in dataset_labels:
+        count = distribution[label]
+        print(f"  {label}: {count} ({100 * count / len(train_rows):.2f}%)")
+    other = {label: count for label, count in distribution.items() if label not in dataset_labels}
+    for label, count in sorted(other.items()):
+        print(f"  {label}: {count} ({100 * count / len(train_rows):.2f}%)")
+    synthetic_count = distribution["commonvoice_code_switch"]
+    nonsynthetic_count = len(train_rows) - synthetic_count
+    commonvoice_count = sum(
+        distribution[label]
+        for label in ("cv_indonesian", "cv_javanese", "commonvoice_code_switch")
+    )
+    print(
+        "Synthetic composition: "
+        f"synthetic={synthetic_count} ({100 * synthetic_count / len(train_rows):.2f}% of training), "
+        f"non-synthetic={nonsynthetic_count} ({100 * nonsynthetic_count / len(train_rows):.2f}% of training); "
+        f"synthetic Common Voice={100 * synthetic_count / commonvoice_count:.2f}%"
+        if commonvoice_count else
+        "Synthetic composition: synthetic=0; no Common Voice rows"
+    )
     eval_rows = (
         test_rows
         if proportional_evaluation_requested

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
 import re
 import shutil
 import subprocess
@@ -32,9 +33,11 @@ FIELDNAMES = [
     "audio_path", "transcript", "source_audio", "start_ms", "end_ms",
     "speakers", "word_langids", "language_counts", "utterance_ids",
     "dataset", "alignment_status", "alignment_confidence", "word_timestamps",
+    "language_type",
 ]
 EXCLUDED_FIELDNAMES = FIELDNAMES + ["exclusion_reason", "duration_ms"]
 WORD_PATTERN = re.compile(r"[^\W_]+(?:[-'’][^\W_]+)*", re.UNICODE)
+COMMONVOICE_MAXIMUM_MS = 30_000
 
 
 def viewer_url(viewer: str, parameter: str, artifact: Path) -> str | None:
@@ -266,6 +269,11 @@ def make_row(
         "alignment_status": status,
         "alignment_confidence": "",
         "word_timestamps": "[]",
+        "language_type": {
+            "cv_indonesian": "indonesian",
+            "cv_javanese": "javanese",
+            "commonvoice_code_switch": "synthetic_code_switch",
+        }.get(dataset, ""),
     }
 
 
@@ -563,6 +571,91 @@ def prepare_development(
         ))
 
 
+def append_pcm_wavs(first: Path, second: Path, destination: Path, gap_ms: int) -> None:
+    """Join two mono 16 kHz PCM WAV files with an exact silent gap."""
+    with wave.open(str(first), "rb") as left, wave.open(str(second), "rb") as right:
+        expected = (1, 2, 16_000, "NONE")
+        if (left.getnchannels(), left.getsampwidth(), left.getframerate(), left.getcomptype()) != expected or (right.getnchannels(), right.getsampwidth(), right.getframerate(), right.getcomptype()) != expected:
+            raise ValueError(f"Expected canonical PCM inputs for {destination}")
+        first_pcm = left.readframes(left.getnframes())
+        second_pcm = right.readframes(right.getnframes())
+    silence = b"\0" * (round(gap_ms * 16_000 / 1000) * 2)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(destination), "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(16_000)
+        writer.writeframes(first_pcm + silence + second_pcm)
+
+
+def prepare_commonvoice(
+    args: argparse.Namespace,
+    output_rows: list[dict[str, str]],
+    excluded_rows: list[dict[str, str]],
+) -> None:
+    """Add eligible Common Voice clips and synthetic Indonesian/Javanese joins."""
+    configs = (
+        ("cv_indonesian", args.commonvoice_indonesian_manifest, args.commonvoice_indonesian_audio_dir, "path", "sentence", None),
+        ("cv_javanese", args.commonvoice_javanese_manifest, args.commonvoice_javanese_audio_dir, "audio_file", "transcription", "duration_ms"),
+    )
+    prepared: dict[str, list[dict[str, str]]] = {"cv_indonesian": [], "cv_javanese": []}
+    for dataset, manifest, audio_dir, audio_column, text_column, duration_column in configs:
+        with manifest.open(encoding="utf-8", newline="") as file:
+            source_rows = list(csv.DictReader(file, delimiter="\t"))
+        durations: dict[str, int] = {}
+        if duration_column is None:
+            with manifest.with_name("clip_durations.tsv").open(encoding="utf-8", newline="") as file:
+                durations = {row["clip"]: int(row["duration[ms]"]) for row in csv.DictReader(file, delimiter="\t")}
+        for number, source_row in enumerate(source_rows, start=2):
+            if args.commonvoice_clips_per_dataset is not None and len(prepared[dataset]) >= args.commonvoice_clips_per_dataset:
+                break
+            filename = source_row.get(audio_column, "").strip()
+            transcript = source_row.get(text_column, "").strip()
+            source = audio_dir / filename
+            declared_duration = (int(source_row[duration_column]) if duration_column and source_row.get(duration_column, "").isdigit() else durations.get(filename))
+            if not filename or not transcript or not source.is_file() or declared_duration is None:
+                continue
+            if declared_duration > COMMONVOICE_MAXIMUM_MS:
+                excluded = make_row(source, transcript, source, 0, declared_duration, source_row.get("client_id", "unknown"), [f"{dataset}:{number}"], dataset, "excluded")
+                excluded.update({"exclusion_reason": "commonvoice_audio_over_30_seconds", "duration_ms": str(declared_duration)})
+                excluded_rows.append(excluded)
+                continue
+            output = args.output_dir / f"{dataset}_{Path(filename).stem}.wav"
+            if not (args.reuse_existing and output.is_file()):
+                transcode(args.ffmpeg, source, output)
+            actual_duration = duration_ms(args.ffprobe, output)
+            if actual_duration > COMMONVOICE_MAXIMUM_MS:
+                continue
+            record = make_row(output, transcript, source, 0, actual_duration, source_row.get("client_id", "unknown"), [f"{dataset}:{number}"], dataset, "source_clip")
+            output_rows.append(record)
+            prepared[dataset].append(record)
+    available = min(len(prepared["cv_indonesian"]), len(prepared["cv_javanese"]))
+    requested = args.commonvoice_code_switch_samples if args.commonvoice_code_switch_samples is not None else available
+    if requested < 0:
+        raise ValueError("Common Voice code-switch samples cannot be negative")
+    rng = random.Random(args.commonvoice_seed)
+    # Sampling with replacement allows a deliberate synthetic-heavy mix while
+    # each pairing still receives an independently sampled partner and gap.
+    indonesian = [rng.choice(prepared["cv_indonesian"]) for _ in range(requested)]
+    javanese = [rng.choice(prepared["cv_javanese"]) for _ in range(requested)]
+    created = 0
+    for number, (left, right) in enumerate(zip(indonesian, javanese), start=1):
+        gap_ms = rng.randint(500, 1000)
+        joined_duration = int(left["end_ms"]) + gap_ms + int(right["end_ms"])
+        if joined_duration > COMMONVOICE_MAXIMUM_MS:
+            continue
+        output = args.output_dir / (
+            f"commonvoice_code_switch_{number:04d}_"
+            f"{Path(left['audio_path']).stem}_{Path(right['audio_path']).stem}_"
+            f"{gap_ms}ms.wav"
+        )
+        if not (args.reuse_existing and output.is_file()):
+            append_pcm_wavs(Path(left["audio_path"]), Path(right["audio_path"]), output, gap_ms)
+        output_rows.append(make_row(output, f"{left['transcript']} {right['transcript']}", Path(left["source_audio"]), 0, joined_duration, "synthetic", json.loads(left["utterance_ids"]) + json.loads(right["utterance_ids"]), "commonvoice_code_switch", "synthetic_indonesian_javanese_join"))
+        created += 1
+    print(f"Prepared Common Voice: Indonesian={len(prepared['cv_indonesian'])}, Javanese={len(prepared['cv_javanese'])}, code-switch={created}")
+
+
 def main() -> None:
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument(
@@ -579,6 +672,13 @@ def main() -> None:
     parser.add_argument("--jember-audio-dir", type=Path, default=Path("indonesian_data/Jember Javanese Spontaneous Speech Corpus/mp3 audio"))
     parser.add_argument("--development-manifest", type=Path, default=Path("indonesian_data/indonesian_dev/metadata.tsv"))
     parser.add_argument("--development-audio-dir", type=Path, default=Path("indonesian_data/indonesian_dev/clips"))
+    parser.add_argument("--commonvoice-indonesian-manifest", type=Path, default=Path("indonesian_data/cv_indonesian/id/test.tsv"))
+    parser.add_argument("--commonvoice-indonesian-audio-dir", type=Path, default=Path("indonesian_data/cv_indonesian/id/clips"))
+    parser.add_argument("--commonvoice-javanese-manifest", type=Path, default=Path("indonesian_data/cv_javanese/ss-corpus-jv.tsv"))
+    parser.add_argument("--commonvoice-javanese-audio-dir", type=Path, default=Path("indonesian_data/cv_javanese/audios"))
+    parser.add_argument("--commonvoice-code-switch-samples", type=int, help="Synthetic Indonesian/Javanese joins; defaults to one per eligible Javanese clip.")
+    parser.add_argument("--commonvoice-clips-per-dataset", type=int, help="Limit usable Common Voice source clips per language for a preview.")
+    parser.add_argument("--commonvoice-seed", type=int, default=1337)
     parser.add_argument(
         "--development-corrected-long-clips",
         type=Path,
@@ -667,6 +767,10 @@ def main() -> None:
         args.jember_audio_dir,
         args.development_manifest,
         args.development_audio_dir,
+        args.commonvoice_indonesian_manifest,
+        args.commonvoice_indonesian_audio_dir,
+        args.commonvoice_javanese_manifest,
+        args.commonvoice_javanese_audio_dir,
     ):
         if not path.exists():
             parser.error(f"Input not found: {path}")
@@ -719,6 +823,7 @@ def main() -> None:
     prepare_development(
         args, output_rows, excluded_rows, args.development_clips
     )
+    prepare_commonvoice(args, output_rows, excluded_rows)
     if args.max_clips is not None:
         output_rows = output_rows[:args.max_clips]
     with args.manifest.open("w", newline="", encoding="utf-8") as file:
