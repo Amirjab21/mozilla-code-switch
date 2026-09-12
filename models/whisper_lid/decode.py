@@ -36,48 +36,27 @@ def decode_with_token_language(
     This intentionally starts with greedy decoding. Beam search needs additional
     bookkeeping to retain language-label histories when candidate beams are reordered.
     """
-    if mel.ndim == 2:
-        mel = mel.unsqueeze(0)
-    if mel.shape[0] != 1:
+    if mel.ndim == 3 and mel.shape[0] != 1:
         raise ValueError("decode_with_token_language accepts one audio clip at a time")
 
-    model.eval()
-    mel = mel.to(model.device)
-    audio_features = model.encoder(mel)
-    probe_tokenizer = get_tokenizer(model.is_multilingual, num_languages=model.num_languages, language="en", task="transcribe")
-    if language is None:
-        _, probabilities = model.detect_language(audio_features, probe_tokenizer)
-        probabilities = probabilities[0]
-        language = max(probabilities, key=probabilities.get)
-    tokenizer = get_tokenizer(model.is_multilingual, num_languages=model.num_languages, language=language, task="transcribe")
+    return decode_batch_with_token_language(
+        model, mel, language=language, max_tokens=max_tokens
+    )[0]
 
-    generated: list[int] = []
-    language_probabilities: list[torch.Tensor] = []
-    tokens = torch.tensor([tokenizer.sot_sequence_including_notimestamps], device=model.device)
-    limit = max_tokens or model.dims.n_text_ctx // 2
-    for _ in range(limit):
-        token_logits, language_logits = model.logits_with_language(tokens, audio_features)
-        next_token_logits = token_logits[:, -1].clone()
-        # `eot` is the first special token; permit it, but never generate a control/timestamp token.
-        next_token_logits[:, tokenizer.eot + 1 :] = -torch.inf
-        next_token = int(next_token_logits.argmax(dim=-1).item())
-        if next_token == tokenizer.eot:
-            break
-        generated.append(next_token)
-        language_probabilities.append(F.softmax(language_logits[0, -1], dim=-1).cpu())
-        tokens = torch.cat([tokens, torch.tensor([[next_token]], device=model.device)], dim=-1)
 
+def _build_result(
+    model,
+    tokenizer,
+    generated: list[int],
+    language_probabilities: list[torch.Tensor],
+    language: str,
+) -> TokenLanguageDecodingResult:
+    """Convert one generated sequence into the established review structure."""
     token_languages = [model.language_labels[int(probs.argmax())] for probs in language_probabilities]
     token_confidences = [float(probs.max()) for probs in language_probabilities]
     try:
         words, word_token_groups = tokenizer.split_to_word_tokens(generated)
     except IndexError:
-        # During early fine-tuning, greedy decoding can stop after an incomplete
-        # multi-byte UTF-8 token sequence.  openai-whisper's Unicode word
-        # splitter assumes the full sequence is valid and indexes beyond the
-        # decoded string in that case.  Keep evaluation running; the decoded
-        # transcript above is still suitable for WER, while this fallback
-        # reports one aggregate language-labelled span in the review output.
         words = [tokenizer.decode(generated)] if generated else []
         word_token_groups = [generated] if generated else []
     merged_words: list[str] = []
@@ -89,10 +68,9 @@ def decode_with_token_language(
         else:
             merged_words.append(word)
             merged_token_groups.append(list(group))
-    words, word_token_groups = merged_words, merged_token_groups
     word_results: list[dict[str, object]] = []
     offset = 0
-    for word, group in zip(words, word_token_groups):
+    for word, group in zip(merged_words, merged_token_groups):
         count = len(group)
         probs = torch.stack(language_probabilities[offset : offset + count]).mean(dim=0)
         word_results.append({
@@ -102,7 +80,6 @@ def decode_with_token_language(
             "token_ids": group,
         })
         offset += count
-
     return TokenLanguageDecodingResult(
         text=tokenizer.decode(generated).strip(),
         clip_language=language,
@@ -111,3 +88,76 @@ def decode_with_token_language(
         token_language_confidences=token_confidences,
         words=word_results,
     )
+
+
+@torch.no_grad()
+def decode_batch_with_token_language(
+    model: WhisperTokenLID,
+    mels: torch.Tensor,
+    *,
+    language: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+) -> list[TokenLanguageDecodingResult]:
+    """Greedily transcribe a batch, with independent EOS stopping per clip."""
+    if mels.ndim == 2:
+        mels = mels.unsqueeze(0)
+    if mels.ndim != 3 or mels.shape[0] == 0:
+        raise ValueError("Expected mel spectrograms shaped (batch, mels, frames)")
+
+    model.eval()
+    mels = mels.to(model.device)
+    audio_features = model.encoder(mels)
+    probe_tokenizer = get_tokenizer(model.is_multilingual, num_languages=model.num_languages, language="en", task="transcribe")
+    if language is None:
+        _, probabilities = model.detect_language(audio_features, probe_tokenizer)
+        languages = [max(item, key=item.get) for item in probabilities]
+    else:
+        languages = [language] * mels.shape[0]
+    tokenizers = [
+        get_tokenizer(
+            model.is_multilingual,
+            num_languages=model.num_languages,
+            language=item_language,
+            task="transcribe",
+        )
+        for item_language in languages
+    ]
+
+    generated: list[list[int]] = [[] for _ in tokenizers]
+    language_probabilities: list[list[torch.Tensor]] = [[] for _ in tokenizers]
+    tokens = torch.tensor(
+        [tokenizer.sot_sequence_including_notimestamps for tokenizer in tokenizers],
+        device=model.device,
+    )
+    finished = [False] * len(tokenizers)
+    eot = tokenizers[0].eot
+    limit = max_tokens or model.dims.n_text_ctx // 2
+    for _ in range(limit):
+        token_logits, language_logits = model.logits_with_language(tokens, audio_features)
+        next_token_logits = token_logits[:, -1].clone()
+        next_token_logits[:, eot + 1 :] = -torch.inf
+        next_tokens = next_token_logits.argmax(dim=-1)
+        if any(finished):
+            finished_mask = torch.tensor(finished, dtype=torch.bool, device=model.device)
+            next_tokens = torch.where(
+                finished_mask, torch.full_like(next_tokens, eot), next_tokens
+            )
+        next_token_values = next_tokens.tolist()
+        for index, next_token in enumerate(next_token_values):
+            if finished[index] or next_token == eot:
+                finished[index] = True
+                continue
+            generated[index].append(next_token)
+            language_probabilities[index].append(
+                F.softmax(language_logits[index, -1], dim=-1).cpu()
+            )
+        if all(finished):
+            break
+        tokens = torch.cat([tokens, next_tokens.unsqueeze(1)], dim=1)
+
+    return [
+        _build_result(model, tokenizer, token_ids, probs, item_language)
+        for tokenizer, token_ids, probs, item_language in zip(
+            tokenizers, generated, language_probabilities, languages
+        )
+    ]

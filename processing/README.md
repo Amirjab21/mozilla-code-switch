@@ -235,3 +235,21 @@ uv run --project processing python processing/07_audio_duration_distribution.py 
 ```
 
 Use `--bins 20` (or another positive number) to change the histogram resolution.
+
+## Trained-model inference
+
+`08_inference.py` loads a LoRA adapter from a training run and evaluates audio
+listed in a CSV. The input CSV must be supplied explicitly with `--csv`; model,
+checkpoint, device, and output settings can come from a named-run YAML file.
+For example:
+
+```bash
+uv run --project processing python processing/08_inference.py \
+  --config processing/runs/first_full_run_gpu.yaml \
+  --csv experiments/indonesian_dev_long_clip_alignment/output/corrected_above30seconds.csv
+```
+
+The script uses Whisper's long-form `transcribe()` loop, so recordings longer
+than 30 seconds are processed across successive windows rather than truncated.
+It writes `results_{run_name}.csv` containing the reference, audio path,
+prediction, and clip WER, then prints both average clip WER and corpus WER.

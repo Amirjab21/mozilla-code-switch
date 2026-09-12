@@ -43,7 +43,10 @@ from models.whisper_lid import (
     load_token_lid_lora_model,
     save_token_lid_lora_adapter,
 )
-from models.whisper_lid.decode import decode_with_token_language
+from models.whisper_lid.decode import (
+    decode_batch_with_token_language,
+    decode_with_token_language,
+)
 from models.whisper_lid.labels import IGNORE_INDEX, make_token_language_targets
 from run_config import apply_defaults, load_section
 from wer_metrics import normalise_for_wer, word_error_rate
@@ -264,23 +267,76 @@ def split_preview_rows(
     return rows[:-test_size], rows[-test_size:]
 
 
-def subsample_jember_training_rows(
-    rows: list[dict[str, str]], fraction: float, seed: int
-) -> tuple[list[dict[str, str]], int, int]:
-    """Randomly retain an exact fraction of Jember rows, preserving row order."""
-    jember_indices = [
-        index for index, row in enumerate(rows) if row.get("dataset") == "jember"
-    ]
-    keep_count = round(len(jember_indices) * fraction)
-    kept_jember_indices = set(
-        random.Random(seed).sample(jember_indices, keep_count)
+def jember_recording_key(row: dict[str, str]) -> str:
+    """Identify the source Jember recording shared by windows/augmentations."""
+    for field in ("augmentation_source_audio", "audio_path"):
+        match = re.search(r"jember_(\d+)_", Path(row.get(field, "")).stem)
+        if match:
+            return match.group(1)
+    source = row.get("source_audio", "").strip()
+    if source:
+        return Path(source).stem
+    raise ValueError(
+        f"Cannot identify Jember recording for {row.get('audio_path', '<unknown>')}"
     )
-    filtered = [
-        row
-        for index, row in enumerate(rows)
-        if row.get("dataset") != "jember" or index in kept_jember_indices
+
+
+def balance_jember_training_percentage(
+    rows: list[dict[str, str]], percentage: float, seed: int
+) -> tuple[list[dict[str, str]], int, int]:
+    """Remove whole Jember recordings to approach a target row percentage."""
+    jember_rows = [row for row in rows if row.get("dataset") == "jember"]
+    development_rows = [
+        row for row in rows
+        if row.get("dataset") == "indonesian_development"
     ]
-    return filtered, len(jember_indices), keep_count
+    other_rows = [
+        row for row in rows
+        if row.get("dataset") not in {"jember", "indonesian_development"}
+    ]
+    if other_rows:
+        raise ValueError(
+            "jember_percentage only supports Jember and Indonesian-development rows"
+        )
+    original_count = len(jember_rows)
+    development_count = len(development_rows)
+    if not original_count or percentage == 100:
+        return rows, original_count, original_count
+    if not development_count:
+        if percentage == 100:
+            return rows, original_count, original_count
+        raise ValueError(
+            "Cannot set jember_percentage without Indonesian-development training rows"
+        )
+
+    current_percentage = 100 * original_count / (original_count + development_count)
+    if current_percentage <= percentage:
+        # Removing Jember can only lower its share, never raise it.
+        return rows, original_count, original_count
+
+    target_count = (
+        0 if percentage == 0
+        else round(percentage * development_count / (100 - percentage))
+    )
+    by_recording: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in jember_rows:
+        by_recording[jember_recording_key(row)].append(row)
+    recording_ids = list(by_recording)
+    random.Random(seed).shuffle(recording_ids)
+    retained_recordings = set(recording_ids)
+    retained_count = original_count
+    for recording_id in recording_ids:
+        reduced_count = retained_count - len(by_recording[recording_id])
+        if abs(reduced_count - target_count) <= abs(retained_count - target_count):
+            retained_recordings.remove(recording_id)
+            retained_count = reduced_count
+
+    filtered = [
+        row for row in rows
+        if row.get("dataset") != "jember"
+        or jember_recording_key(row) in retained_recordings
+    ]
+    return filtered, original_count, retained_count
 
 
 def split_balanced_dataset_evaluation(
@@ -320,65 +376,62 @@ def split_balanced_dataset_evaluation(
     return train, test
 
 
-def split_indonesian_development_speaker_evaluation(
+def augmentation_family_key(row: dict[str, str]) -> str:
+    """Return the clean source shared by an original and all its augmentations."""
+    return row.get("augmentation_source_audio", "").strip() or row["audio_path"]
+
+
+def split_proportional_augmented_evaluation(
     rows: list[dict[str, str]],
-    fully_held_out_speakers: set[str],
-    other_speaker_clips: int,
+    total_clips: int,
+    jember_proportion: float,
     seed: int,
-) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    """Build a clean development-only evaluation split grouped by speaker.
+) -> tuple[list[dict[str, str]], list[dict[str, str]], int, int]:
+    """Select an exact mixed-dataset eval set from the augmented row pool.
 
-    Every clean clip belonging to ``fully_held_out_speakers`` is selected. For
-    every other Indonesian-development speaker, ``other_speaker_clips`` clean
-    clips are selected deterministically. Augmented copies of selected clips
-    are also removed from training to prevent source-audio leakage.
+    At most one row is selected from each augmentation family. Every other
+    member of a selected family is removed from training to prevent a clean
+    clip and its noisy copies leaking across the split.
     """
-    clean_development = [
-        row
-        for row in rows
-        if row.get("dataset") == "indonesian_development"
-        and row.get("augmented", "false").casefold() != "true"
-        and row.get("speed_augmented", "false").casefold() != "true"
-    ]
-    by_speaker: dict[str, list[dict[str, str]]] = defaultdict(list)
-    for row in clean_development:
-        by_speaker[row.get("speakers", "unknown")].append(row)
-
-    missing = sorted(fully_held_out_speakers - set(by_speaker))
-    if missing:
-        raise ValueError(
-            "Requested fully held-out Indonesian-development speakers are missing: "
-            + ", ".join(missing)
-        )
-
-    selected: list[dict[str, str]] = []
+    jember_count = round(total_clips * jember_proportion / 100)
+    development_count = total_clips - jember_count
+    requested = {
+        "jember": jember_count,
+        "indonesian_development": development_count,
+    }
     rng = random.Random(seed)
-    for speaker in sorted(by_speaker, key=lambda value: (not value.isdigit(), value)):
-        speaker_rows = by_speaker[speaker][:]
-        rng.shuffle(speaker_rows)
-        if speaker in fully_held_out_speakers:
-            selected.extend(speaker_rows)
-        else:
-            if len(speaker_rows) < other_speaker_clips:
-                raise ValueError(
-                    f"Indonesian-development speaker {speaker} has only "
-                    f"{len(speaker_rows)} clean clips; {other_speaker_clips} were requested"
-                )
-            selected.extend(speaker_rows[:other_speaker_clips])
+    selected: list[dict[str, str]] = []
+    for dataset, count in requested.items():
+        if count == 0:
+            continue
+        candidates = [row for row in rows if row.get("dataset") == dataset]
+        rng.shuffle(candidates)
+        dataset_selected: list[dict[str, str]] = []
+        seen_families: set[str] = set()
+        for row in candidates:
+            family = augmentation_family_key(row)
+            if family in seen_families:
+                continue
+            seen_families.add(family)
+            dataset_selected.append(row)
+            if len(dataset_selected) == count:
+                break
+        if len(dataset_selected) < count:
+            raise ValueError(
+                f"Proportional evaluation requested {count} {dataset} clips, "
+                f"but only {len(dataset_selected)} independent augmentation "
+                "families are available"
+            )
+        selected.extend(dataset_selected)
 
-    if not selected:
-        raise ValueError("The Indonesian-development speaker evaluation split is empty")
-    selected_paths = {row["audio_path"] for row in selected}
+    selected_families = {augmentation_family_key(row) for row in selected}
     train = [
-        row
-        for row in rows
-        if row["audio_path"] not in selected_paths
-        and row.get("augmentation_source_audio", row["audio_path"])
-        not in selected_paths
+        row for row in rows
+        if augmentation_family_key(row) not in selected_families
     ]
     if not train:
-        raise ValueError("Speaker-based evaluation split left no training clips")
-    return train, selected
+        raise ValueError("Proportional evaluation split left no training clips")
+    return train, selected, jember_count, development_count
 
 
 def recording_key(row: dict[str, str]) -> str:
@@ -583,7 +636,8 @@ def per_example_loss_values(
 @torch.no_grad()
 def evaluate(
     model,
-    loader: DataLoader,
+    loss_loader: DataLoader,
+    decode_loader: DataLoader,
     dataset: MiamiDataset,
     device: torch.device,
     eos_token_id: int,
@@ -594,7 +648,7 @@ def evaluate(
     total_asr_loss = total_lid_loss = 0.0
     batches = correct_lid = total_lid = 0
     losses_by_audio_path: dict[str, dict[str, float]] = {}
-    for batch in tqdm(loader, desc="Held-out loss", leave=False):
+    for batch in tqdm(loss_loader, desc="Held-out loss", leave=False):
         asr_loss, lid_loss, _, correct, count, _ = model_losses(
             model, batch, device, eos_token_id, eos_loss_weight
         )
@@ -611,26 +665,28 @@ def evaluate(
 
     substitutions = deletions = insertions = reference_words = 0
     predictions: list[dict[str, str]] = []
-    for item in tqdm(dataset, desc="Held-out WER", leave=False):
-        result = decode_with_token_language(model, item["mel"], language=language)
-        row = item["row"]
-        s, d, i, words = word_error_rate(row["transcript"], result.text)
-        substitutions += s
-        deletions += d
-        insertions += i
-        reference_words += words
-        row_losses = losses_by_audio_path[row["audio_path"]]
-        predictions.append({
-            "audio_file_path": row["audio_path"],
-            "ground_truth_transcript": row["transcript"],
-            "language_labels": row["word_langids"],
-            "predicted_transcript": result.text,
-            "predicted_language_labels": json.dumps(result.words, ensure_ascii=False),
-            "wer": (s + d + i) / words if words else 0.0,
-            "reference_words": words,
-            "word_errors": s + d + i,
-            **row_losses,
-        })
+    for batch in tqdm(decode_loader, desc="Held-out WER", leave=False):
+        results = decode_batch_with_token_language(
+            model, batch["mels"], language=language
+        )
+        for row, result in zip(batch["rows"], results):
+            s, d, i, words = word_error_rate(row["transcript"], result.text)
+            substitutions += s
+            deletions += d
+            insertions += i
+            reference_words += words
+            row_losses = losses_by_audio_path[row["audio_path"]]
+            predictions.append({
+                "audio_file_path": row["audio_path"],
+                "ground_truth_transcript": row["transcript"],
+                "language_labels": row["word_langids"],
+                "predicted_transcript": result.text,
+                "predicted_language_labels": json.dumps(result.words, ensure_ascii=False),
+                "wer": (s + d + i) / words if words else 0.0,
+                "reference_words": words,
+                "word_errors": s + d + i,
+                **row_losses,
+            })
     token_loss = total_asr_loss / max(batches, 1)
     language_id_loss = total_lid_loss / max(batches, 1)
     return {
@@ -873,6 +929,16 @@ def main() -> None:
     parser.add_argument("--config", type=Path, help="YAML named-run configuration file.")
     parser.add_argument("--manifest", type=Path, default=Path("processed_indonesia/train.csv"))
     parser.add_argument("--output-dir", type=Path, default=Path("processed_indonesia/05_train"))
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Evaluate an existing LoRA adapter without resuming or running training.",
+    )
+    parser.add_argument(
+        "--adapter-dir",
+        type=Path,
+        help="Saved LoRA adapter directory to load when --eval-only is enabled.",
+    )
     parser.add_argument("--base-model", default="small")
     parser.add_argument(
         "--language", default="en",
@@ -894,20 +960,16 @@ def main() -> None:
         help="Hold out exactly this many Jember clips.",
     )
     parser.add_argument(
-        "--eval-indonesian-dev-speakers",
-        default="",
-        help=(
-            "Comma-separated Indonesian-development speaker IDs whose complete "
-            "clean datasets are held out for evaluation."
-        ),
+        "--eval-total-clips",
+        type=int,
+        help="Total rows in the proportional post-augmentation evaluation set.",
     )
     parser.add_argument(
-        "--eval-other-indonesian-dev-clips-per-speaker",
-        type=int,
-        default=0,
+        "--eval-jember-proportion",
+        type=float,
         help=(
-            "Also hold out this many clean clips from every other "
-            "Indonesian-development speaker."
+            "Percentage of --eval-total-clips drawn from Jember; for example, "
+            "60 means 60%% Jember and 40%% Indonesian-dev."
         ),
     )
     parser.add_argument("--lora-rank", type=int, default=16)
@@ -917,13 +979,12 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument(
-        "--jember-train-fraction",
+        "--jember-percentage",
         type=float,
-        default=1.0,
         help=(
-            "Fraction of Jember training rows retained after constructing the "
-            "evaluation split. 0 excludes all Jember training rows. "
-            "Indonesian-dev and evaluation rows are unchanged."
+            "Target percentage of training rows contributed by Jember. Whole "
+            "Jember recordings are removed deterministically to approach it. "
+            "Omit this argument to retain the complete training split."
         ),
     )
     parser.add_argument("--max-samples", type=int, help="Use a deterministic subset of this many manifest rows for a preview run.")
@@ -936,6 +997,12 @@ def main() -> None:
     )
     parser.add_argument("--eval-every-steps", type=int, default=EVAL_EVERY_STEPS)
     parser.add_argument("--eval-set-size", type=int, default=EVAL_SET_SIZE)
+    parser.add_argument(
+        "--eval-decode-batch-size",
+        type=int,
+        default=1,
+        help="Batch size for autoregressive transcript generation during evaluation.",
+    )
     parser.add_argument("--seed", type=int, default=SPLIT_SEED)
     parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda", "mps"))
     parser.add_argument("--num-workers", type=int, default=0)
@@ -956,31 +1023,39 @@ def main() -> None:
         args.wandb_run_name = config_run_name
     if args.epochs < 1 or args.batch_size < 1 or args.eval_every_steps < 1 or args.eval_set_size < 1:
         parser.error("epochs, batch size, evaluation interval, and evaluation size must all be positive")
+    if args.eval_decode_batch_size < 1:
+        parser.error("--eval-decode-batch-size must be positive")
     if args.max_samples is not None and args.max_samples < 2:
         parser.error("--max-samples must be at least 2 so both train and test partitions are non-empty")
     if args.max_train_steps is not None and args.max_train_steps < 1:
         parser.error("--max-train-steps must be positive")
     if args.eos_loss_weight <= 0:
         parser.error("--eos-loss-weight must be positive")
-    if not 0 <= args.jember_train_fraction <= 1:
-        parser.error("--jember-train-fraction must be between 0 and 1 inclusive")
+    if args.eval_only and args.adapter_dir is None:
+        parser.error("--adapter-dir is required when --eval-only is enabled")
+    if not args.eval_only and args.adapter_dir is not None:
+        parser.error("--adapter-dir can only be used with --eval-only")
+    if args.jember_percentage is not None and not 0 <= args.jember_percentage <= 100:
+        parser.error("--jember-percentage must be between 0 and 100")
     if args.eval_indonesian_dev_clips < 0 or args.eval_jember_clips < 0:
         parser.error("Balanced evaluation clip counts cannot be negative")
-    if args.eval_other_indonesian_dev_clips_per_speaker < 0:
-        parser.error("--eval-other-indonesian-dev-clips-per-speaker cannot be negative")
-    fully_held_out_dev_speakers = {
-        speaker.strip()
-        for speaker in args.eval_indonesian_dev_speakers.split(",")
-        if speaker.strip()
-    }
-    speaker_evaluation_requested = bool(fully_held_out_dev_speakers)
-    if speaker_evaluation_requested != bool(
-        args.eval_other_indonesian_dev_clips_per_speaker
+    proportional_evaluation_requested = (
+        args.eval_total_clips is not None
+        or args.eval_jember_proportion is not None
+    )
+    if proportional_evaluation_requested and (
+        args.eval_total_clips is None or args.eval_jember_proportion is None
     ):
         parser.error(
-            "Use --eval-indonesian-dev-speakers and "
-            "--eval-other-indonesian-dev-clips-per-speaker together"
+            "Use --eval-total-clips and --eval-jember-proportion together"
         )
+    if args.eval_total_clips is not None and args.eval_total_clips < 1:
+        parser.error("--eval-total-clips must be at least 1")
+    if (
+        args.eval_jember_proportion is not None
+        and not 0 <= args.eval_jember_proportion <= 100
+    ):
+        parser.error("--eval-jember-proportion must be between 0 and 100")
     if bool(args.eval_indonesian_dev_clips) != bool(args.eval_jember_clips):
         parser.error(
             "Use --eval-indonesian-dev-clips and --eval-jember-clips together"
@@ -989,17 +1064,23 @@ def main() -> None:
         parser.error(
             "--jember-001-first-ten cannot be combined with the balanced evaluation split"
         )
-    if speaker_evaluation_requested and (
-        args.jember_001_first_ten or args.eval_indonesian_dev_clips
+    if proportional_evaluation_requested and (
+        args.jember_001_first_ten
+        or args.eval_indonesian_dev_clips
     ):
         parser.error(
-            "The Indonesian-development speaker evaluation cannot be combined "
+            "The proportional augmented evaluation split cannot be combined "
             "with another explicit evaluation split"
         )
     if not 0 < TRAIN_FRACTION < 1:
         raise RuntimeError("TRAIN_FRACTION must be between zero and one")
 
-    resume_adapter, resume_exact = resolve_existing_output(args.output_dir)
+    if args.eval_only:
+        resume_adapter = resume_exact = False
+        if not args.adapter_dir.is_dir():
+            parser.error(f"Adapter directory not found: {args.adapter_dir}")
+    else:
+        resume_adapter, resume_exact = resolve_existing_output(args.output_dir)
 
     load_dotenv(args.env_file)
     if args.wandb_mode == "online" and not os.getenv("WANDB_API_KEY"):
@@ -1013,6 +1094,23 @@ def main() -> None:
         rows = filter_jember_001_first_ten(rows)
         train_rows, test_rows = split_preview_rows(rows)
         split_unit = "diagnostic Jember windows (first eight train, final two test)"
+    elif proportional_evaluation_requested:
+        (
+            train_rows,
+            test_rows,
+            evaluation_jember_count,
+            evaluation_development_count,
+        ) = split_proportional_augmented_evaluation(
+            rows,
+            args.eval_total_clips,
+            args.eval_jember_proportion,
+            args.seed,
+        )
+        split_unit = (
+            f"post-augmentation rows ({evaluation_jember_count} Jember, "
+            f"{evaluation_development_count} Indonesian-development; "
+            "augmentation families held entirely out)"
+        )
     elif args.eval_indonesian_dev_clips:
         train_rows, test_rows = split_balanced_dataset_evaluation(
             rows,
@@ -1024,19 +1122,6 @@ def main() -> None:
             f"balanced clips ({args.eval_indonesian_dev_clips} Indonesian-development, "
             f"{args.eval_jember_clips} Jember)"
         )
-    elif speaker_evaluation_requested:
-        train_rows, test_rows = split_indonesian_development_speaker_evaluation(
-            rows,
-            fully_held_out_dev_speakers,
-            args.eval_other_indonesian_dev_clips_per_speaker,
-            args.seed,
-        )
-        split_unit = (
-            "Indonesian-development speakers "
-            f"{','.join(sorted(fully_held_out_dev_speakers))} fully held out, plus "
-            f"{args.eval_other_indonesian_dev_clips_per_speaker} clips from every "
-            "other development speaker"
-        )
     elif args.max_samples is not None:
         rng = random.Random(args.seed)
         rng.shuffle(rows)
@@ -1044,31 +1129,43 @@ def main() -> None:
         train_rows, test_rows, split_unit = split_rows(rows, args.seed)
     else:
         train_rows, test_rows, split_unit = split_rows(rows, args.seed)
-    if args.jember_train_fraction < 1:
+    if args.jember_percentage is not None:
         train_rows, original_jember_count, retained_jember_count = (
-            subsample_jember_training_rows(
-                train_rows, args.jember_train_fraction, args.seed + 10_000
+            balance_jember_training_percentage(
+                train_rows, args.jember_percentage, args.seed + 10_000
             )
         )
+        retained_development_count = sum(
+            row.get("dataset") == "indonesian_development" for row in train_rows
+        )
+        achieved_percentage = (
+            100 * retained_jember_count
+            / max(retained_jember_count + retained_development_count, 1)
+        )
         print(
-            f"Jember training filter retained {retained_jember_count}/"
-            f"{original_jember_count} rows "
-            f"({args.jember_train_fraction:.1%}); evaluation rows unchanged"
+            f"Jember percentage filter retained {retained_jember_count}/"
+            f"{original_jember_count} Jember rows; achieved "
+            f"{achieved_percentage:.2f}% (target {args.jember_percentage:g}%)"
         )
     if not train_rows or not test_rows:
         raise RuntimeError("The split produced an empty train or test partition")
-    # A speaker-defined evaluation set is exact: do not silently truncate the
-    # complete speaker 5/7 holdouts via the generic --eval-set-size cap.
     eval_rows = (
         test_rows
-        if speaker_evaluation_requested
+        if proportional_evaluation_requested
         else test_rows[: min(args.eval_set_size, len(test_rows))]
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_manifest(args.output_dir / "train_split.csv", train_rows)
     write_manifest(args.output_dir / "test_split.csv", test_rows)
 
-    if resume_adapter:
+    if args.eval_only:
+        model = load_token_lid_lora_adapter(
+            args.adapter_dir,
+            device=device,
+            download_root=str(args.download_root),
+        )
+        print(f"Loaded LoRA adapter for evaluation from {args.adapter_dir}")
+    elif resume_adapter:
         model = load_token_lid_lora_adapter(
             args.output_dir / "best_lora",
             device=device,
@@ -1094,6 +1191,85 @@ def main() -> None:
     eval_dataset = MiamiDataset(eval_rows, tokenizer, model.dims.n_mels)
     collate = lambda items: collate_batch(items, tokenizer)
     eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate)
+    eval_decode_loader = DataLoader(
+        eval_dataset,
+        batch_size=args.eval_decode_batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=collate,
+    )
+
+    if args.eval_only:
+        evaluation_jember_rows = sum(
+            row.get("dataset") == "jember" for row in eval_rows
+        )
+        evaluation_development_rows = sum(
+            row.get("dataset") == "indonesian_development" for row in eval_rows
+        )
+        print(
+            "Evaluation set composition: "
+            f"Jember={evaluation_jember_rows}, "
+            f"Indonesian-dev={evaluation_development_rows}"
+        )
+        metrics, evaluation_rows = evaluate(
+            model,
+            eval_loader,
+            eval_decode_loader,
+            eval_dataset,
+            device,
+            tokenizer.eot,
+            args.eos_loss_weight,
+            language=args.language,
+        )
+        evaluation_csv = args.output_dir / "eval_predictions.csv"
+        metrics_path = args.output_dir / "evaluation_metrics.json"
+        write_evaluation_csv(evaluation_csv, evaluation_rows)
+        metrics_path.write_text(
+            json.dumps(metrics, indent=2, allow_nan=True) + "\n",
+            encoding="utf-8",
+        )
+        run_label = str(config_run_name or args.wandb_run_name or args.adapter_dir.parent.name)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_run_label = re.sub(r"[^A-Za-z0-9_-]+", "_", run_label)
+        html_path = args.analysis_dir / f"{timestamp}_run_{safe_run_label}.html"
+        write_evaluation_html(
+            html_path,
+            evaluation_rows,
+            run_label,
+            metrics["eval/loss"],
+            [],
+        )
+        print(
+            f"Evaluation only: clips={int(metrics['eval/clips'])}, "
+            f"loss={metrics['eval/loss']:.4f}, WER={metrics['eval/wer']:.3%}, "
+            f"LID accuracy={metrics['eval/lid_accuracy']:.3%}"
+        )
+        print(f"Wrote evaluation predictions to {evaluation_csv}")
+        print(f"Wrote evaluation metrics to {metrics_path}")
+        print(f"Wrote evaluation review to {html_path}")
+        try:
+            relative_html = html_path.resolve().relative_to(REPOSITORY_ROOT)
+        except ValueError:
+            print(f"Evaluation review: {html_path.resolve().as_uri()}")
+        else:
+            print(
+                "Evaluation review: "
+                f"http://127.0.0.1:8000/{quote(relative_html.as_posix())}"
+            )
+        try:
+            relative_output = args.output_dir.resolve().relative_to(
+                REPOSITORY_ROOT / "processed_indonesia"
+            )
+        except ValueError:
+            pass
+        else:
+            print(
+                "Reusable evaluation viewer: "
+                "http://127.0.0.1:8000/analysis_indonesia/training_evaluation.html"
+                f"?folder={quote(relative_output.as_posix())}"
+            )
+        release_evaluation_memory(device)
+        return
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
 
@@ -1227,6 +1403,7 @@ def main() -> None:
         metrics, evaluation_rows = evaluate(
             model,
             eval_loader,
+            eval_decode_loader,
             eval_dataset,
             device,
             tokenizer.eot,
@@ -1306,6 +1483,20 @@ def main() -> None:
         if device.type in {"mps", "cuda"}:
             print(f"Released cached {device.type.upper()} evaluation memory")
         return metrics
+
+    training_jember_count = sum(
+        row.get("dataset") == "jember" for row in train_rows
+    )
+    training_development_count = sum(
+        row.get("dataset") == "indonesian_development" for row in train_rows
+    )
+    training_total = training_jember_count + training_development_count
+    print(
+        "Training set composition: "
+        f"Jember={training_jember_count}, "
+        f"Indonesian-dev={training_development_count}, "
+        f"Jember share={training_jember_count / max(training_total, 1):.2%}"
+    )
 
     try:
         current_epoch = max(1, start_epoch)

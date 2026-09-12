@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Inference evaluation</title>
+  <style>
+    body{margin:0;background:#10151f;color:#e9edf3;font:16px system-ui,-apple-system,sans-serif}.wrap{max-width:1080px;margin:0 auto;padding:28px}
+    h1{margin:0 0 6px}.sub{color:#aebbd0;margin:0 0 20px}.controls{display:flex;gap:10px;align-items:center;margin:18px 0;flex-wrap:wrap}.controls button,.controls select{font:inherit;padding:8px 12px}.controls input{flex:1;min-width:180px}
+    .summary,.card{background:#182131;border:1px solid #2d3c55;border-radius:10px;padding:20px;margin-bottom:20px}.summary{display:flex;gap:24px;flex-wrap:wrap}.summary strong{display:block;font-size:1.35rem}.summary span{color:#aebbd0;font-size:.82rem;text-transform:uppercase;letter-spacing:.05em}
+    .label{display:block;color:#aebbd0;font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin:18px 0 5px}.text{white-space:pre-wrap;line-height:1.6}.diff{padding:12px;background:#0d131e;border-radius:6px}.diff span{display:inline-block;padding:1px 3px;margin:1px;border-radius:3px}.correct{color:#c9d4e5}.substitution{background:#71313b;color:#fff}.deletion{background:#71313b;color:#fff;text-decoration:line-through}.insertion{background:#24577a;color:#fff}.legend{color:#aebbd0;font-size:.85rem;margin-bottom:8px}.error{color:#ff9d9d}audio{width:100%;margin-top:12px}
+    @media(max-width:650px){.wrap{padding:18px}.summary{gap:14px}.controls label{width:100%}}
+  </style>
+</head>
+<body>
+<main class="wrap">
+  <h1>Inference evaluation</h1>
+  <p class="sub" id="source">Loading results…</p>
+  <section class="summary" id="summary" hidden></section>
+  <div class="controls">
+    <label>Sort <select id="sort"><option value="original">Original order</option><option value="wer-desc">WER: highest first</option><option value="wer-asc">WER: lowest first</option></select></label>
+    <button id="previous" type="button">← Previous</button>
+    <input id="position" type="range" min="0" value="0">
+    <button id="next" type="button">Next →</button>
+  </div>
+  <section class="card" id="result" hidden>
+    <strong id="title"></strong>
+    <audio id="audio" controls preload="metadata"></audio>
+    <span class="label">Clip metrics</span><div class="text" id="metrics"></div>
+    <span class="label">Scored word differences</span>
+    <div class="legend">Red = substitution/deletion · Blue = insertion</div>
+    <div class="text diff" id="reference-diff"></div>
+    <div class="text diff" id="prediction-diff"></div>
+    <span class="label">Actual transcript</span><div class="text" id="actual"></div>
+    <span class="label">Predicted transcript</span><div class="text" id="predicted"></div>
+  </section>
+  <p class="error" id="error"></p>
+</main>
+<script>
+const query=new URLSearchParams(location.search);
+const csvUrl=new URL(query.get('csv')||'../experiments/inference_results/results_window_preview_noise_whisper_small_full_eos4.csv',location.href);
+const audioBase=new URL(query.get('audio_base')||'../',location.href);
+let originalRows=[],rows=[],current=0;
+const $=id=>document.getElementById(id);
+const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+
+function parseCsv(text){
+  const output=[];let row=[],cell='',quoted=false;
+  for(let index=0;index<text.length;index++){
+    const character=text[index];
+    if(character==='"'&&quoted&&text[index+1]==='"'){cell+='"';index++}
+    else if(character==='"'){quoted=!quoted}
+    else if(character===','&&!quoted){row.push(cell);cell=''}
+    else if((character==='\n'||character==='\r')&&!quoted){if(character==='\r'&&text[index+1]==='\n')index++;row.push(cell);if(row.some(Boolean))output.push(row);row=[];cell=''}
+    else{cell+=character}
+  }
+  if(cell||row.length){row.push(cell);output.push(row)}
+  const headers=output.shift()||[];
+  return output.map(values=>Object.fromEntries(headers.map((header,index)=>[header,values[index]||''])));
+}
+
+function normaliseWords(text){return String(text??'').toLocaleLowerCase().replace(/[^\p{L}\p{N}_\s]/gu,'').split(/\s+/).filter(Boolean)}
+
+function alignWords(reference,hypothesis){
+  const rows=reference.length,columns=hypothesis.length;
+  const costs=Array.from({length:rows+1},()=>Array(columns+1).fill(0));
+  for(let i=1;i<=rows;i++)costs[i][0]=i;
+  for(let j=1;j<=columns;j++)costs[0][j]=j;
+  for(let i=1;i<=rows;i++)for(let j=1;j<=columns;j++)costs[i][j]=reference[i-1]===hypothesis[j-1]?costs[i-1][j-1]:Math.min(costs[i-1][j-1],costs[i-1][j],costs[i][j-1])+1;
+  const operations=[];let i=rows,j=columns;
+  while(i||j){
+    if(i&&j&&reference[i-1]===hypothesis[j-1]&&costs[i][j]===costs[i-1][j-1]){operations.push({type:'correct',reference:reference[--i],hypothesis:hypothesis[--j]})}
+    else if(i&&j&&costs[i][j]===costs[i-1][j-1]+1){operations.push({type:'substitution',reference:reference[--i],hypothesis:hypothesis[--j]})}
+    else if(i&&costs[i][j]===costs[i-1][j]+1){operations.push({type:'deletion',reference:reference[--i],hypothesis:''})}
+    else{operations.push({type:'insertion',reference:'',hypothesis:hypothesis[--j]})}
+  }
+  operations.reverse();
+  const counts={substitutions:0,deletions:0,insertions:0,referenceWords:rows};
+  for(const operation of operations)if(operation.type==='substitution')counts.substitutions++;else if(operation.type==='deletion')counts.deletions++;else if(operation.type==='insertion')counts.insertions++;
+  return {operations,counts};
+}
+
+function decorate(row){
+  const alignment=alignWords(normaliseWords(row.actual_transcript),normaliseWords(row.predicted_transcript));
+  const errors=alignment.counts.substitutions+alignment.counts.deletions+alignment.counts.insertions;
+  return {...row,_alignment:alignment,_errors:errors,_wer:alignment.counts.referenceWords?errors/alignment.counts.referenceWords:Number(row.wer)};
+}
+
+function diffHtml(operations,field,label){
+  const tokens=operations.filter(operation=>operation[field]).map(operation=>`<span class="${operation.type}">${escapeHtml(operation[field])}</span>`).join(' ');
+  return `<strong>${label}:</strong> ${tokens}`;
+}
+
+function audioUrl(path){return new URL(path,audioBase).href}
+function show(){
+  if(!rows.length)return;
+  const row=rows[current],counts=row._alignment.counts;
+  $('position').value=current;
+  $('title').textContent=`Clip ${current+1} of ${rows.length}: ${row.audio_path}`;
+  $('audio').src=audioUrl(row.audio_path);
+  $('metrics').textContent=`WER: ${(row._wer*100).toFixed(3)}% · ${row._errors}/${counts.referenceWords} word errors · substitutions: ${counts.substitutions} · deletions: ${counts.deletions} · insertions: ${counts.insertions}`;
+  $('reference-diff').innerHTML=diffHtml(row._alignment.operations,'reference','Actual');
+  $('prediction-diff').innerHTML=diffHtml(row._alignment.operations,'hypothesis','Prediction');
+  $('actual').textContent=row.actual_transcript;
+  $('predicted').textContent=row.predicted_transcript;
+}
+
+function updateSummary(){
+  const average=originalRows.reduce((sum,row)=>sum+row._wer,0)/originalRows.length;
+  const errors=originalRows.reduce((sum,row)=>sum+row._errors,0);
+  const words=originalRows.reduce((sum,row)=>sum+row._alignment.counts.referenceWords,0);
+  $('summary').innerHTML=`<div><strong>${originalRows.length}</strong><span>Clips</span></div><div><strong>${(average*100).toFixed(3)}%</strong><span>Average clip WER</span></div><div><strong>${(errors/words*100).toFixed(3)}%</strong><span>Corpus WER · ${errors}/${words}</span></div>`;
+  $('summary').hidden=false;
+}
+
+function sortRows(){
+  rows=originalRows.slice();current=0;
+  if($('sort').value==='wer-desc')rows.sort((a,b)=>b._wer-a._wer);
+  if($('sort').value==='wer-asc')rows.sort((a,b)=>a._wer-b._wer);
+  show();
+}
+
+function initialise(){
+  $('previous').addEventListener('click',()=>{current=(current+rows.length-1)%rows.length;show()});
+  $('next').addEventListener('click',()=>{current=(current+1)%rows.length;show()});
+  $('position').addEventListener('input',event=>{current=Number(event.target.value);show()});
+  $('sort').addEventListener('change',sortRows);
+  fetch(csvUrl).then(response=>{if(!response.ok)throw Error(`${response.status} ${response.statusText}`);return response.text()}).then(text=>{
+    originalRows=parseCsv(text).map(decorate);rows=originalRows.slice();
+    if(!rows.length)throw Error('The inference CSV contains no records');
+    $('position').max=rows.length-1;$('source').textContent=csvUrl.pathname.split('/').pop();$('result').hidden=false;updateSummary();show();
+  }).catch(error=>{$('source').textContent='Inference results could not be loaded';$('error').textContent=`${csvUrl}: ${error.message}`});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initialise,{once:true});else initialise();
+</script>
+</body>
+</html>
