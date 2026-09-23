@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPOSITORY_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-S3_SOURCE="${1:-s3://ait-ai-storage-prod/indonesian-data/}"
+S3_SOURCE="${1:-s3://ait-ai-storage-prod/indonesian_data/}"
 LOCAL_DESTINATION="$REPOSITORY_DIR/indonesian_data"
 
 mkdir -p "$LOCAL_DESTINATION"

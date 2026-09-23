@@ -36,3 +36,13 @@ uv run --project processing python processing/05_train.py \
 ```
 
 Online W&B runs require `WANDB_API_KEY` in the root `.env`. See [the processing guide](processing/README.md) for data preparation, preview runs, and individual stage commands.
+
+training:
+
+```
+PATH="$PWD/.ffmpeg-env/bin:$PATH" \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+uv run --project processing \
+  python processing/05_train.py \
+  --config processing/runs/full_run_g5_gpu_v2_percentage.yaml
+```

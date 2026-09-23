@@ -68,7 +68,7 @@ augment:
   workers: 16
 
 train:
-  manifest: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/03_dataset_with_augmented.csv
+  manifest: processed_indonesia/first_full_run_data_mix_commonvoice/03_dataset_with_augmented.csv
   output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/05_train
   base_model: large-v3
   language: id
