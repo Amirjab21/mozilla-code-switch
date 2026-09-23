@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Common Voice Indonesian &amp; Javanese</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #0b1020; color: #e8edf8; }
+    * { box-sizing: border-box; }
+    body { margin: 0; } main { max-width: 1220px; margin: auto; padding: 28px 20px 56px; }
+    h1 { margin: 0; font-size: clamp(1.6rem, 4vw, 2.35rem); } h2 { margin: 0; font-size: 1.05rem; }
+    .sub, .muted { color: #9ba9c3; } .sub { margin: 7px 0 24px; line-height: 1.5; }
+    .summary { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 10px; margin: 0 0 24px; }
+    .metric, .panel { border: 1px solid #2c3955; background: #121a2d; border-radius: 10px; }
+    .metric { padding: 13px; } .metric span { color: #9ba9c3; display: block; font-size: .78rem; letter-spacing: .04em; text-transform: uppercase; } .metric strong { display: block; margin-top: 5px; font-size: 1.25rem; }
+    .panel { padding: 18px; margin: 16px 0; } .panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; margin-bottom: 12px; }
+    .controls { display: grid; grid-template-columns: 190px minmax(200px, 1fr) 170px; gap: 10px; align-items: end; }
+    label { display: grid; gap: 5px; color: #9ba9c3; font-size: .82rem; } input, select { color: inherit; background: #0d1527; border: 1px solid #3a4968; border-radius: 6px; padding: 9px 10px; font: inherit; }
+    input:focus, select:focus { outline: 2px solid #769fff; outline-offset: 1px; } button { color: #eef4ff; border: 1px solid #506998; background: #20345d; border-radius: 6px; padding: 8px 11px; font: inherit; cursor: pointer; } button:hover { background: #294579; } button:disabled { opacity: .45; cursor: not-allowed; }
+    #histogram { display: block; width: 100%; height: 245px; overflow: visible; } .axis { stroke: #52617e; } .bar-id { fill: #5c8dff; } .bar-jv { fill: #bc78ea; } .tick { fill: #aebbd0; font-size: 12px; } .axis-title { fill: #cbd7ed; font-size: 12px; font-weight: 600; } .legend { display: flex; gap: 16px; color: #aebbd0; font-size: .86rem; } .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; } .dot.id { background: #5c8dff; } .dot.jv { background: #bc78ea; }
+    .dataset-name { font-weight: 700; } .id { color: #9bc2ff; } .jv { color: #e2b5ff; }
+    .clip-layout { display: grid; grid-template-columns: minmax(300px, .95fr) minmax(0, 1.55fr); gap: 18px; }
+    .clip-list { max-height: 610px; overflow: auto; border: 1px solid #2c3955; border-radius: 8px; background: #0c1324; }
+    .clip { display: grid; width: 100%; text-align: left; border: 0; border-bottom: 1px solid #25324b; border-radius: 0; background: transparent; padding: 11px 12px; gap: 4px; } .clip:last-child { border-bottom: 0; } .clip.active { background: #20345d; } .clip b { font-size: .88rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .clip small { color: #aebbd0; }
+    .detail { min-width: 0; padding: 5px 2px; } .detail audio { width: 100%; margin: 16px 0 10px; } .label { color: #9ba9c3; display: block; font-size: .76rem; font-weight: 700; letter-spacing: .08em; margin: 19px 0 6px; text-transform: uppercase; } .transcript { background: #0c1324; border-radius: 7px; line-height: 1.6; padding: 13px; white-space: pre-wrap; }
+    .metadata { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 14px; } .metadata div { border: 1px solid #2c3955; border-radius: 7px; padding: 9px; } .metadata span { color: #9ba9c3; display: block; font-size: .75rem; } .metadata strong { font-size: .9rem; overflow-wrap: anywhere; }
+    .pager { display: flex; align-items: center; gap: 9px; margin-top: 13px; } #status.error { color: #ffb1b1; }
+    @media (max-width: 760px) { main { padding: 20px 14px 42px; } .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } .controls, .clip-layout { grid-template-columns: 1fr; } .clip-list { max-height: 380px; } .panel { padding: 14px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Common Voice datasets</h1>
+    <p class="sub">Indonesian test clips and Javanese spontaneous-speech clips available in this repository.</p>
+    <p id="status" class="muted">Loading dataset manifests…</p>
+    <section class="summary" id="summary" hidden>
+      <div class="metric"><span>Usable clips</span><strong id="clipCount">—</strong></div>
+      <div class="metric"><span>Indonesian</span><strong id="indonesianCount">—</strong></div>
+      <div class="metric"><span>Javanese</span><strong id="javaneseCount">—</strong></div>
+      <div class="metric"><span>Median duration</span><strong id="medianDuration">—</strong></div>
+    </section>
+    <section class="panel" id="distributionPanel" hidden>
+      <div class="panel-head"><h2>Audio duration distribution</h2><div class="legend"><span><i class="dot id"></i>Indonesian</span><span><i class="dot jv"></i>Javanese</span></div></div>
+      <svg id="histogram" role="img" aria-label="Histogram comparing audio durations in Indonesian and Javanese Common Voice datasets"></svg>
+    </section>
+    <section class="panel" id="browserPanel" hidden>
+      <div class="panel-head"><h2>Clip browser</h2><span class="muted" id="visibleCount">—</span></div>
+      <div class="controls">
+        <label>Dataset<select id="dataset"><option value="all">Both datasets</option><option value="cv_indonesian">Indonesian</option><option value="cv_javanese">Javanese</option></select></label>
+        <label>Search transcript or filename<input id="search" type="search" placeholder="e.g. sekolah, common_voice…"></label>
+        <label>Maximum duration<select id="duration"><option value="all">Any duration</option><option value="5">Up to 5 seconds</option><option value="10">Up to 10 seconds</option><option value="20">Up to 20 seconds</option><option value="30">Up to 30 seconds</option></select></label>
+      </div>
+      <div class="clip-layout" style="margin-top:18px">
+        <div><div class="clip-list" id="clipList" aria-label="Common Voice clips"></div><div class="pager"><button id="previous">Previous</button><span class="muted" id="pageInfo">—</span><button id="next">Next</button></div></div>
+        <article class="detail" id="detail"></article>
+      </div>
+    </section>
+  </main>
+  <script>
+    const ROOT = '';
+    const SOURCES = [
+      { dataset: 'cv_indonesian', language: 'Indonesian', manifest: 'indonesian_data/cv_indonesian/id/test.tsv', audioDir: 'indonesian_data/cv_indonesian/id/clips', audioColumn: 'path', transcriptColumn: 'sentence', durationManifest: 'indonesian_data/cv_indonesian/id/clip_durations.tsv' },
+      { dataset: 'cv_javanese', language: 'Javanese', manifest: 'indonesian_data/cv_javanese/ss-corpus-jv.tsv', audioDir: 'indonesian_data/cv_javanese/audios', audioColumn: 'audio_file', transcriptColumn: 'transcription', durationColumn: 'duration_ms' }
+    ];
+    const PAGE_SIZE = 45;
+    const state = { all: [], filtered: [], page: 0, selected: null };
+    const $ = id => document.getElementById(id);
+    const esc = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[character]));
+    const seconds = milliseconds => `${(milliseconds / 1000).toFixed(milliseconds < 10000 ? 1 : 0)} s`;
+    function parseTsv(text) { const lines = text.trim().split(/\r?\n/); const headers = lines.shift().split('\t'); return lines.map(line => Object.fromEntries(headers.map((header, index) => [header, line.split('\t')[index] || '']))); }
+    async function fetchText(path) { const response = await fetch(`${ROOT}${path}`); if (!response.ok) throw new Error(`${path}: ${response.status} ${response.statusText}`); return response.text(); }
+    async function readSource(source) {
+      const rows = parseTsv(await fetchText(source.manifest));
+      let durations = new Map();
+      if (source.durationManifest) for (const row of parseTsv(await fetchText(source.durationManifest))) durations.set(row.clip, Number(row['duration[ms]']));
+      return rows.map(row => {
+        const filename = row[source.audioColumn]; const transcript = row[source.transcriptColumn]; const durationMs = source.durationColumn ? Number(row[source.durationColumn]) : durations.get(filename);
+        return { dataset: source.dataset, language: source.language, filename, transcript, durationMs, audioPath: `${source.audioDir}/${filename}`, speaker: row.client_id || 'not available', gender: row.gender || 'not available', age: row.age || 'not available' };
+      }).filter(row => row.filename && row.transcript && Number.isFinite(row.durationMs));
+    }
+    function median(values) { const sorted = values.slice().sort((a,b) => a-b); const middle = Math.floor(sorted.length / 2); return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2; }
+    function drawHistogram() {
+      const svg = $('histogram'), width = Math.max(svg.clientWidth, 300), height = 245, margin = { top: 14, right: 18, bottom: 44, left: 46 }, innerWidth = width - margin.left - margin.right, innerHeight = height - margin.top - margin.bottom;
+      svg.setAttribute('viewBox', `0 0 ${width} ${height}`); const maxSeconds = Math.max(...state.all.map(row => row.durationMs / 1000)); const binWidth = maxSeconds <= 30 ? 2 : 5; const bins = Math.ceil(maxSeconds / binWidth); const counts = Object.fromEntries(SOURCES.map(source => [source.dataset, Array(bins).fill(0)]));
+      for (const row of state.all) counts[row.dataset][Math.min(bins - 1, Math.floor((row.durationMs / 1000) / binWidth))] += 1;
+      const maxCount = Math.max(1, ...Object.values(counts).flat()); const y = value => margin.top + innerHeight - value / maxCount * innerHeight; const groupWidth = innerWidth / bins; let markup = `<line class="axis" x1="${margin.left}" y1="${margin.top + innerHeight}" x2="${width-margin.right}" y2="${margin.top+innerHeight}"/><line class="axis" x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${margin.top+innerHeight}"/>`;
+      for (let i = 0; i < bins; i += 1) { const x = margin.left + i * groupWidth; const barWidth = Math.max(1, groupWidth * .38); const id = counts.cv_indonesian[i], jv = counts.cv_javanese[i]; markup += `<rect class="bar-id" x="${x + groupWidth*.08}" y="${y(id)}" width="${barWidth}" height="${margin.top+innerHeight-y(id)}"><title>${i*binWidth}–${(i+1)*binWidth}s: ${id} Indonesian clips</title></rect><rect class="bar-jv" x="${x + groupWidth*.54}" y="${y(jv)}" width="${barWidth}" height="${margin.top+innerHeight-y(jv)}"><title>${i*binWidth}–${(i+1)*binWidth}s: ${jv} Javanese clips</title></rect>`; if (bins <= 15 || i % Math.ceil(bins / 8) === 0) markup += `<text class="tick" x="${x}" y="${height-25}" text-anchor="middle">${i*binWidth}</text>`; }
+      for (let i = 0; i <= 4; i += 1) { const value = Math.round(maxCount * i / 4); markup += `<text class="tick" x="${margin.left-8}" y="${y(value)+4}" text-anchor="end">${value}</text>`; }
+      markup += `<text class="axis-title" x="${margin.left + innerWidth/2}" y="${height-4}" text-anchor="middle">Duration (seconds)</text><text class="axis-title" transform="translate(13 ${margin.top+innerHeight/2}) rotate(-90)" text-anchor="middle">Clips</text>`; svg.innerHTML = markup;
+    }
+    function filterRows() { const dataset = $('dataset').value, needle = $('search').value.trim().toLocaleLowerCase(), cap = $('duration').value === 'all' ? Infinity : Number($('duration').value) * 1000; state.filtered = state.all.filter(row => (dataset === 'all' || row.dataset === dataset) && row.durationMs <= cap && `${row.filename} ${row.transcript}`.toLocaleLowerCase().includes(needle)); state.page = 0; state.selected = state.filtered[0] || null; renderBrowser(); }
+    function renderBrowser() { const totalPages = Math.max(1, Math.ceil(state.filtered.length / PAGE_SIZE)); state.page = Math.min(state.page, totalPages - 1); const pageRows = state.filtered.slice(state.page * PAGE_SIZE, (state.page + 1) * PAGE_SIZE); $('visibleCount').textContent = `${state.filtered.length.toLocaleString()} matching clips`; $('clipList').innerHTML = pageRows.length ? pageRows.map((row, index) => `<button class="clip ${row === state.selected ? 'active' : ''}" data-index="${index}"><b class="${row.dataset === 'cv_indonesian' ? 'id' : 'jv'}">${esc(row.filename)}</b><small>${esc(row.language)} · ${seconds(row.durationMs)}</small><small>${esc(row.transcript)}</small></button>`).join('') : '<p class="muted" style="padding:12px">No matching clips.</p>'; document.querySelectorAll('.clip[data-index]').forEach(button => button.onclick = () => { state.selected = pageRows[Number(button.dataset.index)]; renderBrowser(); }); $('previous').disabled = state.page === 0; $('next').disabled = state.page >= totalPages - 1; $('pageInfo').textContent = `Page ${state.page + 1} of ${totalPages}`; renderDetail(); }
+    function renderDetail() { const row = state.selected; $('detail').innerHTML = row ? `<div class="dataset-name ${row.dataset === 'cv_indonesian' ? 'id' : 'jv'}">${esc(row.language)}</div><h2 style="margin-top:5px">${esc(row.filename)}</h2><audio controls preload="metadata" src="${esc(row.audioPath)}"></audio><span class="label">Transcript</span><div class="transcript">${esc(row.transcript)}</div><div class="metadata"><div><span>Duration</span><strong>${seconds(row.durationMs)}</strong></div><div><span>Dataset</span><strong>${esc(row.dataset)}</strong></div><div><span>Speaker</span><strong>${esc(row.speaker)}</strong></div><div><span>Age / gender</span><strong>${esc(row.age)} / ${esc(row.gender)}</strong></div></div>` : '<p class="muted">Choose a clip to inspect it.</p>'; }
+    function initialise(rows) { state.all = rows; const indo = rows.filter(row => row.dataset === 'cv_indonesian'), java = rows.filter(row => row.dataset === 'cv_javanese'); $('clipCount').textContent = rows.length.toLocaleString(); $('indonesianCount').textContent = indo.length.toLocaleString(); $('javaneseCount').textContent = java.length.toLocaleString(); $('medianDuration').textContent = seconds(median(rows.map(row => row.durationMs))); $('summary').hidden = $('distributionPanel').hidden = $('browserPanel').hidden = false; $('status').textContent = `Loaded ${rows.length.toLocaleString()} clips with transcripts and available duration metadata.`; drawHistogram(); filterRows(); }
+    Promise.all(SOURCES.map(readSource)).then(groups => initialise(groups.flat())).catch(error => { $('status').className = 'error'; $('status').textContent = `Could not load the dataset manifests: ${error.message}. Serve the repository root (for example, python3 -m http.server) rather than opening this file directly.`; });
+    ['dataset', 'search', 'duration'].forEach(id => $(id).addEventListener(id === 'search' ? 'input' : 'change', filterRows)); $('previous').onclick = () => { state.page -= 1; renderBrowser(); }; $('next').onclick = () => { state.page += 1; renderBrowser(); }; new ResizeObserver(drawHistogram).observe($('distributionPanel'));
+  </script>
+</body>
+</html>

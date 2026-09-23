@@ -1,7 +1,6 @@
-# LoRA-capacity ablation of full_run_g5_gpu.
-# Stages 01-03 deliberately reuse the v1 processed dataset so the training
-# comparison changes only LoRA rank, alpha, and dropout.
-run_name: full_run_g5_gpu_v2
+# V2 LoRA ablation with recording-level Jember balancing and a proportional
+# post-augmentation evaluation split. Stages 01-03 reuse the v1 outputs.
+run_name: full_run_g5_gpu_v2_percentage
 
 pipeline:
   output_dir: processed_indonesia/full_run_g5_gpu
@@ -64,19 +63,22 @@ augment:
 
 train:
   manifest: processed_indonesia/full_run_g5_gpu/03_dataset_with_augmented.csv
-  output_dir: processed_indonesia/full_run_g5_gpu/05_whisper_small_lora_r32_a64_d005
+  output_dir: processed_indonesia/full_run_g5_gpu/05_whisper_small_v2_percentage
   base_model: small
   language: id
   epochs: 10
   batch_size: 8
   num_workers: 8
+  jember_percentage: 60
   lora_rank: 32
   lora_alpha: 64
   lora_dropout: 0.05
   learning_rate: 0.0001
   weight_decay: 0.01
+  eval_total_clips: 100
+  eval_jember_proportion: 60
   eval_every_steps: 600
   device: cuda
   wandb_project: indonesian-whisper-small-lora
-  wandb_run_name: full-run-g5-gpu-r32-a64-drophalfjember
+  wandb_run_name: full-run-g5-gpu-v2-percentage
   wandb_mode: online

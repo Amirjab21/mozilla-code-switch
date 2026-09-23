@@ -150,11 +150,17 @@
     }
 
     function resolveAudioPath(path) {
-      const filename = String(path || '').split(/[/\\]/).pop();
+      const rawPath = String(path || '');
+      const filename = rawPath.split(/[/\\]/).pop();
       const base = $('audioBase').value.trim().replace(/\/$/, '');
-      if (!filename) return path;
+      if (!filename) return rawPath;
+      // A CSV with repository-relative audio paths (such as the Common Voice
+      // evaluator's output) can retain its directory structure by using an
+      // empty audio base or '.'.  Existing filename-only CSVs keep using the
+      // configured directory below.
+      if (!base || base === '.') return rawPath;
       if (base) return `${base}/${filename}`;
-      return path;
+      return rawPath;
     }
 
     function setSummary(rows) {

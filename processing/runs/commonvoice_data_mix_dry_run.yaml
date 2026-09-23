@@ -1,0 +1,27 @@
+# Bounded stage-1 preview for checking Common Voice formatting and synthetic joins.
+run_name: commonvoice_data_mix_dry_run
+
+pipeline:
+  output_dir: processed_indonesia/commonvoice_data_mix_dry_run
+  max-recordings: 0
+  development-clips: 0
+  commonvoice-clips-per-dataset: 50
+  commonvoice-code-switch-samples: 50
+  commonvoice-seed: 1337
+  max-clip-seconds: 30.0
+  jember-max-clip-seconds: 30.0
+  development-max-clip-seconds: 30.0
+  min-words: 2
+  prepare-workers: 1
+  reuse-existing: true
+
+prepare:
+  output_dir: processed_indonesia/commonvoice_data_mix_dry_run/01_segments
+  manifest: processed_indonesia/commonvoice_data_mix_dry_run/01_segments.csv
+  max-recordings: 0
+  development-clips: 0
+  commonvoice-clips-per-dataset: 50
+  commonvoice-code-switch-samples: 50
+  commonvoice-seed: 1337
+  max-clip-seconds: 30.0
+  reuse-existing: true

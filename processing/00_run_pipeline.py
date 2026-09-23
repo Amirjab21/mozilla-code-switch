@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run segmentation, start correction, noise augmentation, and Whisper training."""
+"""Run segmentation, start correction, noise augmentation, and ASR training."""
 
 from __future__ import annotations
 
@@ -308,9 +308,19 @@ def main() -> None:
         stage_3_args += ["--commonvoice-augmentation-multiplier", str(args.commonvoice_augmentation_multiplier)]
     run("03_augment_audio_with_noise.py", stage_3_args)
 
-    # Stage 5: Whisper LoRA fine-tuning. The train section of the same YAML is
-    # loaded directly by 05_train.py; the stage-3 manifest is always wired in
-    # explicitly so processing and training cannot accidentally diverge.
+    # Stage 5: model-specific LoRA fine-tuning. The selected trainer loads the
+    # train section directly; the stage-3 manifest is always wired explicitly
+    # so processing and training cannot accidentally diverge.
+    training_backend = str(train_values.get("backend", "whisper"))
+    training_scripts = {
+        "whisper": "05_train.py",
+        "qwen3_asr": "05_train_qwen3_asr.py",
+    }
+    if training_backend not in training_scripts:
+        raise ValueError(
+            f"Unsupported train.backend {training_backend!r}; choose one of "
+            f"{', '.join(sorted(training_scripts))}"
+        )
     stage_5_args = ["--manifest", str(augmented_manifest)]
     if args.config is not None:
         stage_5_args += ["--config", str(args.config)]
@@ -318,7 +328,7 @@ def main() -> None:
         stage_5_args += ["--output-dir", str(args.training_output_dir)]
     elif args.config is None:
         stage_5_args += ["--output-dir", str(training_output_dir)]
-    run("05_train.py", stage_5_args)
+    run(training_scripts[training_backend], stage_5_args)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "dataset.json").write_text(json.dumps({

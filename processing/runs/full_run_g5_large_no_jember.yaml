@@ -78,22 +78,19 @@ augment:
 
 train:
   manifest: processed_indonesia/full_run_g5_large_no_jember/03_dataset_with_augmented.csv
-  output_dir: processed_indonesia/full_run_g5_large_no_jember/05_whisper_medium
-  base_model: medium
+  output_dir: processed_indonesia/full_run_g5_large_no_jember/05_whisper_large_no_jember
+  base_model: large-v3
   language: id
   epochs: 10
-  batch_size: 6
+  batch_size: 2
   num_workers: 8
   lora_rank: 16
   lora_alpha: 32
-  jember_train_fraction: 0.0
   lora_dropout: 0.05
   learning_rate: 0.0001
   weight_decay: 0.01
-  eval_indonesian_dev_speakers: "5,7"
-  eval_other_indonesian_dev_clips_per_speaker: 0
-  eval_every_steps: 75
+  eval_every_steps: 125
   device: cuda
   wandb_project: indonesian-whisper-medium-lora
-  wandb_run_name: full-run-g5-whisper-medium
+  wandb_run_name: full-run-g5-whisper-large-v3-no-jember
   wandb_mode: online

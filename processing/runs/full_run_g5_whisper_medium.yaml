@@ -27,7 +27,7 @@ pipeline:
   start_match_device: cuda
   noise_dir: indonesian_data/room_noises
   jember_augmentation_multiplier: 0.1
-  development_augmentation_multiplier: 10.0
+  development_augmentation_multiplier: 2.0
   min_noise_fraction: 0.25
   max_noise_fraction: 0.75
   min_snr_db: 5.0
@@ -68,7 +68,7 @@ augment:
   output_dir: processed_indonesia/full_run_g5_whisper_medium/03_augmented_audio
   noise_dir: indonesian_data/room_noises
   jember_augmentation_multiplier: 0.1
-  development_augmentation_multiplier: 10.0
+  development_augmentation_multiplier: 2.0
   min_noise_fraction: 0.25
   max_noise_fraction: 0.75
   min_snr_db: 5.0
@@ -86,12 +86,10 @@ train:
   num_workers: 8
   lora_rank: 16
   lora_alpha: 32
-  lora_dropout: 0.0
+  lora_dropout: 0.05
   learning_rate: 0.0001
   weight_decay: 0.01
-  eval_indonesian_dev_speakers: "5,7"
-  eval_other_indonesian_dev_clips_per_speaker: 5
-  eval_every_steps: 600
+  eval_every_steps: 75
   device: cuda
   wandb_project: indonesian-whisper-medium-lora
   wandb_run_name: full-run-g5-whisper-medium

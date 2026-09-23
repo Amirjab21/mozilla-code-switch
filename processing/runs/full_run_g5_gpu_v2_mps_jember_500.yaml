@@ -1,0 +1,27 @@
+# Local MPS diagnostic derived from full_run_g5_gpu_v2.
+# It prepares and start-corrects only 500 Jember clips for manual review.
+run_name: full_run_g5_gpu_v2_mps_jember_500
+
+prepare:
+  output_dir: processed_indonesia/full_run_g5_gpu_v2_mps_jember_500/01_segments
+  manifest: processed_indonesia/full_run_g5_gpu_v2_mps_jember_500/01_segments.csv
+  jember_clips: 500
+  development_clips: 0
+  min_clip_seconds: 3.0
+  max_clip_seconds: 30.0
+  min_words: 2
+  jember_stride_overlap_rows: 1
+  prepare_workers: 1
+  reuse_existing: true
+
+match:
+  clips: processed_indonesia/full_run_g5_gpu_v2_mps_jember_500/01_segments.csv
+  output: processed_indonesia/full_run_g5_gpu_v2_mps_jember_500/clip_start_matches.json
+  output_csv: processed_indonesia/full_run_g5_gpu_v2_mps_jember_500/02_processed.csv
+  limit: 500
+  audio_seconds: 5.0
+  word_search_amount: 13
+  match_words: 2
+  closeness_metric: levenshtein
+  model: indonesian-nlp/wav2vec2-indonesian-javanese-sundanese
+  device: mps

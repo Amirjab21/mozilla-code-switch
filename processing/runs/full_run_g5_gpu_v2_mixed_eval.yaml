@@ -1,0 +1,16 @@
+# Re-evaluate the previous V2 best-loss adapter on a 60/40 Jember/dev split.
+# This does not train or modify the original checkpoint.
+run_name: full_run_g5_gpu_v2_mixed_eval
+
+train:
+  manifest: processed_indonesia/full_run_g5_gpu/03_dataset_with_augmented.csv
+  adapter_dir: processed_indonesia/full_run_g5_gpu/05_whisper_small_lora_r32_a64_d005/best_lora
+  output_dir: processed_indonesia/full_run_g5_gpu/05_whisper_small_lora_r32_a64_d005_mixed_eval
+  eval_only: true
+  language: id
+  batch_size: 8
+  num_workers: 8
+  eval_total_clips: 100
+  eval_jember_proportion: 60
+  device: cuda
+  wandb_mode: disabled

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Latest evaluation runs comparison</title>
+  <style>
+    :root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif;background:#0c111b;color:#edf2ff}
+    body{margin:0}main{max-width:1500px;margin:auto;padding:26px 20px 60px}h1{margin:0 0 5px}.muted{color:#aebbd0}
+    .toolbar{position:sticky;top:0;z-index:3;background:rgba(12,17,27,.96);backdrop-filter:blur(8px);padding:14px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    button,select,input{background:#202c42;color:#fff;border:1px solid #425271;border-radius:7px;padding:9px}button{background:#5077db;cursor:pointer}input[type=range]{flex:1;min-width:220px}
+    .summary,.runs{display:grid;grid-template-columns:repeat(4,minmax(230px,1fr));gap:12px}.summary{margin:15px 0 22px}.summary article,.run,.shared{background:#161f2e;border:1px solid #2c3b55;border-radius:10px;padding:16px}
+    .summary strong{display:block;font-size:1.25rem;margin-top:5px}.shared{margin-bottom:14px}audio{width:100%;margin:10px 0}.label{display:block;color:#9eabc0;font-size:.76rem;font-weight:750;letter-spacing:.07em;text-transform:uppercase;margin:15px 0 5px}
+    .text{white-space:pre-wrap;line-height:1.7}.run h2{font-size:1rem;margin:0 0 8px}.metric{font-size:1.15rem;font-weight:700}.best{border-color:#42b978;box-shadow:0 0 0 1px #42b978 inset}.best .metric{color:#79dfa8}.missing{opacity:.55}.error{color:#ff9e9e;white-space:pre-wrap}
+    .word{display:inline-block;padding:1px 3px;margin:1px;border-radius:3px}.word.bad{background:#7e2834;color:#fff}.word.deleted{background:#7e2834;color:#ffd6d9;text-decoration:line-through}.counts{margin-top:5px;color:#ffb7bc}
+    @media(max-width:1050px){.summary,.runs{grid-template-columns:repeat(2,minmax(230px,1fr))}}@media(max-width:600px){.summary,.runs{grid-template-columns:1fr}}
+  </style>
+</head>
+<body><main>
+  <h1>Latest evaluation runs</h1>
+  <p class="muted">Aligned by audio path. The green card has the lowest per-clip WER.</p>
+  <div class="toolbar">
+    <button id="previous">← Previous</button><input id="position" type="range" min="0" value="0"><button id="next">Next →</button>
+    <label>Order <select id="sort"><option value="original">Original</option><option value="gap">Largest WER disagreement</option><option value="worst">Highest mean WER</option><option value="best">Lowest mean WER</option></select></label>
+  </div>
+  <p id="status" class="muted">Loading CSV files…</p>
+  <section id="summary" class="summary"></section>
+  <section id="shared" class="shared" hidden>
+    <strong id="clipTitle"></strong><audio id="audio" controls preload="metadata"></audio>
+    <span class="label">Ground-truth transcript</span><div id="reference" class="text"></div>
+  </section>
+  <section id="runs" class="runs"></section>
+</main><script>
+const SOURCES=[
+  {name:'Best eval',file:'best_eval.csv'},
+  {name:'Best WER',file:'best_wer.csv'},
+  {name:'Data-mix eval',file:'datamix_eval.csv'},
+  {name:'Data-mix WER',file:'datamix_wer.csv'},
+];
+const $=id=>document.getElementById(id);const state={runs:[],paths:[],original:[],current:0};
+function parseCsv(text){const records=[];let row=[],field='',quoted=false;for(let i=0;i<text.length;i++){const c=text[i];if(quoted){if(c==='"'&&text[i+1]==='"'){field+='"';i++}else if(c==='"')quoted=false;else field+=c}else if(c==='"')quoted=true;else if(c===','){row.push(field);field=''}else if(c==='\n'){row.push(field.replace(/\r$/,''));records.push(row);row=[];field=''}else field+=c}if(field||row.length){row.push(field);records.push(row)}const [headers,...data]=records;return data.filter(values=>values.some(Boolean)).map(values=>Object.fromEntries(headers.map((h,i)=>[h,values[i]||''])))}
+const number=value=>Number.isFinite(Number(value))?Number(value):null;
+function aggregate(rows){const refs=rows.reduce((n,r)=>n+(number(r.reference_words)||0),0),errors=rows.reduce((n,r)=>n+(number(r.word_errors)||0),0);return refs?errors/refs:null}
+function resolveAudio(path){if(/^(https?:|file:|data:)/i.test(path)||path.startsWith('/'))return path;return `../${path}`}
+function normaliseWord(word){return String(word).toLocaleLowerCase().replace(/[^\p{L}\p{N}_]/gu,'')}
+function transcriptWords(text){return String(text||'').split(/\s+/).map(display=>({display,key:normaliseWord(display)})).filter(item=>item.key)}
+function alignWords(referenceText,predictionText){const ref=transcriptWords(referenceText),hyp=transcriptWords(predictionText),rows=ref.length,cols=hyp.length;const dp=Array.from({length:rows+1},()=>Array(cols+1).fill(0));for(let i=0;i<=rows;i++)dp[i][0]=i;for(let j=0;j<=cols;j++)dp[0][j]=j;for(let i=1;i<=rows;i++)for(let j=1;j<=cols;j++)dp[i][j]=Math.min(dp[i-1][j]+1,dp[i][j-1]+1,dp[i-1][j-1]+(ref[i-1].key===hyp[j-1].key?0:1));const operations=[];let i=rows,j=cols,substitutions=0,deletions=0,insertions=0;while(i||j){if(i&&j&&ref[i-1].key===hyp[j-1].key&&dp[i][j]===dp[i-1][j-1]){operations.push({type:'equal',word:hyp[j-1].display});i--;j--}else if(i&&j&&dp[i][j]===dp[i-1][j-1]+1){operations.push({type:'substitution',word:hyp[j-1].display,title:`Expected: ${ref[i-1].display}`});substitutions++;i--;j--}else if(j&&dp[i][j]===dp[i][j-1]+1){operations.push({type:'insertion',word:hyp[j-1].display,title:'Inserted word'});insertions++;j--}else{operations.push({type:'deletion',word:`−${ref[i-1].display}`,title:'Missing from prediction'});deletions++;i--}}return{operations:operations.reverse(),substitutions,deletions,insertions}}
+function renderWordErrors(container,alignment){container.replaceChildren();alignment.operations.forEach(operation=>{const span=document.createElement('span');span.className=`word ${operation.type==='equal'?'':operation.type==='deletion'?'deleted':'bad'}`;span.textContent=operation.word;span.title=operation.title||'Correct';container.append(span);container.append(document.createTextNode(' '))})}
+function valuesFor(path){return state.runs.map(run=>run.byPath.get(path)).filter(Boolean)}
+function pathStats(path){const values=valuesFor(path).map(row=>number(row.wer)).filter(v=>v!==null);if(!values.length)return{mean:-1,gap:-1};return{mean:values.reduce((a,b)=>a+b,0)/values.length,gap:Math.max(...values)-Math.min(...values)}}
+function renderSummary(){const host=$('summary');host.replaceChildren();state.runs.forEach(run=>{const card=document.createElement('article'),wer=aggregate(run.rows);card.innerHTML=`<span class="muted">${run.name}</span><strong>${wer===null?'—':(wer*100).toFixed(2)+'%'}</strong><span class="muted">${run.rows.length} clips</span>`;host.append(card)})}
+function show(){const path=state.paths[state.current];if(!path)return;$('position').value=state.current;$('position').max=Math.max(state.paths.length-1,0);const rows=valuesFor(path),reference=rows[0];$('shared').hidden=false;$('clipTitle').textContent=`Clip ${state.current+1} of ${state.paths.length}: ${path}`;$('audio').src=resolveAudio(path);$('reference').textContent=reference.ground_truth_transcript||'';const wers=rows.map(row=>number(row.wer)).filter(v=>v!==null),minimum=wers.length?Math.min(...wers):null;const host=$('runs');host.replaceChildren();state.runs.forEach(run=>{const row=run.byPath.get(path),card=document.createElement('article');card.className='run'+(!row?' missing':'');if(!row){card.innerHTML=`<h2>${run.name}</h2><div class="muted">Clip absent from this CSV</div>`}else{const wer=number(row.wer),isBest=wer!==null&&wer===minimum,alignment=alignWords(row.ground_truth_transcript,row.predicted_transcript);if(isBest)card.classList.add('best');card.innerHTML=`<h2>${run.name}</h2><div class="metric">WER: ${wer===null?'—':(wer*100).toFixed(2)+'%'}</div><div class="muted">${row.word_errors||'—'} errors / ${row.reference_words||'—'} reference words · loss ${number(row.loss)?.toFixed(4)??'—'}</div><div class="counts">Substitutions: ${alignment.substitutions} · Deletions: ${alignment.deletions} · Insertions: ${alignment.insertions}</div><span class="label">Predicted transcript with errors</span><div class="text"></div>`;renderWordErrors(card.querySelector('.text'),alignment)}host.append(card)})}
+function sortPaths(){const mode=$('sort').value;state.paths=state.original.slice();if(mode!=='original')state.paths.sort((a,b)=>{const left=pathStats(a),right=pathStats(b);if(mode==='gap')return right.gap-left.gap;if(mode==='worst')return right.mean-left.mean;return left.mean-right.mean});state.current=0;show()}
+async function load(){try{state.runs=await Promise.all(SOURCES.map(async source=>{const response=await fetch(`../latest_runs/${source.file}`,{cache:'no-store'});if(!response.ok)throw new Error(`${source.file}: HTTP ${response.status}`);const rows=parseCsv(await response.text());return{...source,rows,byPath:new Map(rows.map(row=>[row.audio_file_path,row]))}}));const all=new Set();state.runs.forEach(run=>run.rows.forEach(row=>all.add(row.audio_file_path)));state.original=[...all];state.paths=state.original.slice();renderSummary();$('status').textContent=`Loaded ${state.runs.length} runs and ${state.paths.length} unique clips.`;show()}catch(error){$('status').className='error';$('status').textContent=`Could not load comparisons: ${error.message}\nServe the repository over HTTP rather than opening this file directly.`}}
+$('previous').onclick=()=>{if(!state.paths.length)return;state.current=(state.current+state.paths.length-1)%state.paths.length;show()};$('next').onclick=()=>{if(!state.paths.length)return;state.current=(state.current+1)%state.paths.length;show()};$('position').oninput=event=>{state.current=Number(event.target.value);show()};$('sort').onchange=sortPaths;load();
+</script></body></html>

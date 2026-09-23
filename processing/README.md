@@ -42,6 +42,7 @@ uv run --project processing python processing/05_train.py \
 - Raw Jember recordings: `indonesian_data/Jember Javanese Spontaneous Speech Corpus/mp3 audio/*.mp3`
 - Jember timestamps/transcripts: `indonesian_data/Jember Javanese Spontaneous Speech Corpus/Jember Javanese Spontaneous Speech Corpus - 1-200.tsv`
 - Development clips and metadata: `indonesian_data/indonesian_dev/clips/*.mp3` and `indonesian_data/indonesian_dev/metadata.tsv`
+- Common Voice evaluation clips: `indonesian_data/cv_indonesian/id/test.tsv` and `indonesian_data/cv_javanese/ss-corpus-jv.tsv`
 - Stage 1 output: source-aligned WAV clips in `processed_indonesia/01_segments/` and `processed_indonesia/01_segments.csv`
 - Stage 2 output: start-corrected Jember transcripts plus unchanged Indonesian development rows in `processed_indonesia/02_processed.csv`; detailed matching results are stored in `processed_indonesia/clip_start_matches.json`
 
@@ -73,6 +74,8 @@ python3 -m http.server 8000
 The viewer can filter by corpus, play each generated WAV, and show its transcript, source range, and included TSV rows. Stage 1 never modifies the source TSV or source MP3s.
 
 The supplied sources do not contain word-level language-ID labels, so each token is retained with the explicit `other` label rather than a fabricated Indonesian/Javanese split.
+
+Common Voice Indonesian and Javanese clips are also prepared by default. Clips over 30 seconds are excluded. Stage 1 creates one deterministic synthetic Indonesian/Javanese code-switch example per eligible Javanese clip by appending one clip from each language with a uniformly random 0.5–1.0 second silent gap; joins over 30 seconds are skipped. Use `--commonvoice-code-switch-samples` to request fewer joins (or `0` to omit them) and `--commonvoice-seed` to reproduce a pairing.
 
 Key options: `--jember-manifest`, `--jember-audio-dir`, `--development-manifest`, `--development-audio-dir`, `--output-dir`, and `--manifest`.
 
@@ -156,6 +159,33 @@ uv run --project processing python processing/05_train.py \
 
 For a no-upload smoke test, pass `--wandb-mode disabled`. Training saves `last_lora/` after each epoch and `final_lora/` at completion; these are compact PEFT adapters containing the LoRA weights and the language-ID head, not duplicate Whisper base weights.
 
+### Qwen3-ASR all-linear LoRA training
+
+`05_train_qwen3_asr.py` fine-tunes `Qwen/Qwen3-ASR-1.7B` with LoRA attached
+to every linear module in both the audio encoder and text decoder. It reuses
+the same augmentation-family-safe evaluation split and Jember training cap as
+the Whisper run. Indonesian rows receive Qwen's `Indonesian` language prefix;
+Javanese and code-switched rows use `None` because Qwen3-ASR does not advertise
+Javanese as a supported language.
+
+Install FlashAttention 2 separately on the CUDA training host, then run:
+
+```bash
+uv sync --project processing
+uv run --project processing python processing/05_train_qwen3_asr.py \
+  --config processing/runs/first_full_run_data_mix_commonvoice_jember_1200_qwen3_asr.yaml
+```
+
+The checkpoints under `best_lora/`, `best_wer/`, and `last_lora/` are PEFT
+adapters and include processor files plus metadata naming the base model and
+all targeted modules.
+
+Re-run fresh greedy decoding from the best-WER adapter with:
+
+```bash
+uv run --project processing python processing/09_evaluate_qwen3_asr.py
+```
+
 ### Limited training preview
 
 Use `--max-samples` to select a deterministic subset before the 90/10 split and `--max-train-steps` to bound runtime. This still performs the complete train/test split, W&B logging, periodic held-out evaluation, and checkpoint writing:
@@ -201,6 +231,29 @@ uv run --project processing python processing/05_train.py \
 ```
 
 This creates the deterministic 90/10 split, evaluates at steps 5 and 10, writes WER and language-ID metrics, and saves `last_lora/` and `final_lora/`. Once the local smoke test succeeds, remove `--wandb-mode disabled` to log online using `WANDB_API_KEY` from `.env`.
+
+### Evaluate a checkpoint on Common Voice Indonesian and Javanese
+
+`09_evaluate_commonvoice.py` samples the same number of usable clips from the
+local Common Voice Indonesian test split and Javanese spontaneous-speech
+corpus, then runs the normal Whisper `transcribe` inference path. It writes a
+single CSV with dataset name, audio path, original and predicted transcripts,
+per-clip WER, and edit counts; it prints separate average-clip and corpus WER
+summaries for Indonesian, Javanese, and their combined set.
+
+```bash
+uv run --project processing python processing/09_evaluate_commonvoice.py \
+  --checkpoint processed_indonesia/window_preview_noise/05_whisper_small_full_eos4/best_wer \
+  --subset-per-dataset 100 \
+  --batch-size 8
+```
+
+The default output is `<checkpoint>/commonvoice_evaluation.csv`. Serve the
+repository root, open `evaluation_full.html`, select that CSV, and set **Audio
+base** to `.` so the CSV's repository-relative audio paths play correctly.
+`--batch-size` defaults to 1; clips of 30 seconds or less are decoded together,
+using greedy decoding. Longer clips retain Whisper's windowed single-clip
+greedy inference path.
 
 ## Preview run
 

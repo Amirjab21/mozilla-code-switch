@@ -77,8 +77,6 @@ train:
   lora_dropout: 0.0
   learning_rate: 0.0001
   weight_decay: 0.01
-  eval_indonesian_dev_speakers: "5,7"
-  eval_other_indonesian_dev_clips_per_speaker: 5
   eval_every_steps: 600
   device: cuda
   wandb_project: indonesian-whisper-small-lora

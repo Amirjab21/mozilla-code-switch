@@ -11,6 +11,7 @@ dependencies = [
   "pyctcdecode>=0.5.0",
   "python-dotenv>=1.0",
   "pyyaml>=6.0",
+  "qwen-asr",
   "silero-vad>=5.1.2",
   "torch>=2.0",
   "torchaudio>=2.0",

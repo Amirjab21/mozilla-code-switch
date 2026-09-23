@@ -1,10 +1,10 @@
 # Training-only rerun using the completed first_full_run_gpu stage-3 dataset.
 # This deliberately writes to a new output directory and W&B run.
-run_name: first_full_run_gpu_training_v2
+run_name: first_full_run_gpu_dev5_jember05_run1
 
 train:
   manifest: processed_indonesia/first_full_run_gpu/03_dataset_with_augmented.csv
-  output_dir: processed_indonesia/first_full_run_gpu/05_whisper_small_dataset_multipliers_v2
+  output_dir: processed_indonesia/first_full_run_gpu/05_whisper_small_dev5_jember05_run1
   base_model: small
   language: id
   epochs: 10
@@ -15,10 +15,8 @@ train:
   lora_dropout: 0.0
   learning_rate: 0.0001
   weight_decay: 0.01
-  eval_indonesian_dev_speakers: "5,7"
-  eval_other_indonesian_dev_clips_per_speaker: 5
   eval_every_steps: 600
   device: cuda
   wandb_project: indonesian-whisper-small-lora
-  wandb_run_name: first-full-run-gpu-dataset-multipliers-v2
+  wandb_run_name: first-full-run-gpu-dev5-jember05-run1
   wandb_mode: online

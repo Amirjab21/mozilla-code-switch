@@ -1,0 +1,24 @@
+# Staged LoRA run: one Jember-only epoch followed by Indonesian-dev-only
+# fine-tuning, reusing the processed dataset from full_run_g5_gpu.
+run_name: full_run_g5_gpu_v2_curriculum
+
+train:
+  manifest: processed_indonesia/full_run_g5_gpu/03_dataset_with_augmented.csv
+  output_dir: processed_indonesia/full_run_g5_gpu/05_whisper_small_v2_curriculum
+  base_model: small
+  language: id
+  epochs: 10
+  batch_size: 8
+  num_workers: 8
+  training_curriculum: jember_then_indonesian_dev
+  jember_curriculum_epochs: 1
+  lora_rank: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  eval_every_steps: 600
+  device: cuda
+  wandb_project: indonesian-whisper-small-lora
+  wandb_run_name: full-run-g5-gpu-v2-curriculum
+  wandb_mode: online

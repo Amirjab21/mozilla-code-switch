@@ -24,6 +24,7 @@ pipeline:
   min_snr_db: 5.0
   max_snr_db: 20.0
   augmentation_seed: 1337
+  augment_workers: 8
 
 prepare:
   output_dir: processed_indonesia/window_preview_noise_gpu_test/01_segments
@@ -58,13 +59,15 @@ augment:
   min_snr_db: 5.0
   max_snr_db: 20.0
   seed: 1337
+  workers: 8
 
 train:
   output_dir: processed_indonesia/window_preview_noise_gpu_test/05_whisper_small
   base_model: small
   language: id
   epochs: 10
-  batch_size: 10
+  batch_size: 9
+  num_workers: 4
   lora_rank: 16
   lora_alpha: 32
   lora_dropout: 0.0
