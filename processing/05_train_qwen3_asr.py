@@ -295,36 +295,46 @@ def evaluate_transcripts(
     wrapper: Any,
     rows: list[dict[str, str]],
     loss: float,
+    batch_size: int,
 ) -> tuple[dict[str, float], list[dict[str, Any]]]:
     predictions: list[dict[str, Any]] = []
     substitutions = deletions = insertions = reference_words = 0
-    for row in tqdm(rows, desc="Held-out WER", leave=False):
-        result = wrapper.transcribe(
-            audio=row["audio_path"],
+    batches = [
+        rows[start:start + batch_size]
+        for start in range(0, len(rows), batch_size)
+    ]
+    for batch in tqdm(batches, desc="Held-out WER", leave=False):
+        results = wrapper.transcribe(
+            audio=[row["audio_path"] for row in batch],
             language=None,
-        )[0]
-        predicted_text = result.text.strip()
-        s, d, i, words = word_error_rate(row["transcript"], predicted_text)
-        substitutions += s
-        deletions += d
-        insertions += i
-        reference_words += words
-        predictions.append(
-            {
-                "audio_file_path": row["audio_path"],
-                "ground_truth_transcript": row["transcript"],
-                "language_labels": row.get("word_langids", "[]"),
-                "predicted_transcript": predicted_text,
-                "predicted_language": result.language,
-                "predicted_language_labels": "[]",
-                "wer": (s + d + i) / words if words else 0.0,
-                "reference_words": words,
-                "word_errors": s + d + i,
-                "loss": loss,
-                "token_loss": loss,
-                "language_id_loss": "",
-            }
         )
+        if len(results) != len(batch):
+            raise RuntimeError(
+                f"Qwen returned {len(results)} results for a batch of {len(batch)} clips"
+            )
+        for row, result in zip(batch, results):
+            predicted_text = result.text.strip()
+            s, d, i, words = word_error_rate(row["transcript"], predicted_text)
+            substitutions += s
+            deletions += d
+            insertions += i
+            reference_words += words
+            predictions.append(
+                {
+                    "audio_file_path": row["audio_path"],
+                    "ground_truth_transcript": row["transcript"],
+                    "language_labels": row.get("word_langids", "[]"),
+                    "predicted_transcript": predicted_text,
+                    "predicted_language": result.language,
+                    "predicted_language_labels": "[]",
+                    "wer": (s + d + i) / words if words else 0.0,
+                    "reference_words": words,
+                    "word_errors": s + d + i,
+                    "loss": loss,
+                    "token_loss": loss,
+                    "language_id_loss": "",
+                }
+            )
     metrics = {
         "eval/loss": loss,
         "eval/token_loss": loss,
@@ -448,7 +458,7 @@ def main() -> None:
     print(f"Evaluation distribution: {eval_distribution}")
     print(f"Training distribution: {dict(Counter(row['dataset'] for row in train_rows))}")
 
-    wrapper, model, adapter, target_modules = load_qwen_lora(
+    wrapper, _model, adapter, target_modules = load_qwen_lora(
         args.base_model,
         device=device,
         dtype=dtype,
@@ -523,7 +533,7 @@ def main() -> None:
             adapter.config.use_cache = True
         loss = evaluate_loss(adapter, eval_loader, device, dtype)
         metrics, predictions = evaluate_transcripts(
-            wrapper, eval_rows, loss
+            wrapper, eval_rows, loss, args.eval_decode_batch_size
         )
         write_evaluation(args.output_dir / "eval_predictions.csv", predictions)
         if metrics["eval/loss"] < best_loss:

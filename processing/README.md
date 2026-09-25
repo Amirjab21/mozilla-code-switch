@@ -9,12 +9,16 @@ uv sync --project processing
 uv run --project processing python processing/00_run_pipeline.py
 ```
 
-The command now runs only two stages: `01_prepare_indonesian_segments.py`, followed by `02_match_predicted_clip_start.py`. Jember transcript starts are matched using Wav2Vec2; Indonesian development transcripts pass through unchanged. It does not run VAD, audio normalization, training, or ASR evaluation, and it does not alter the Miami `processed/` directory.
+Jember transcript starts are matched using Wav2Vec2 in `02_match_predicted_clip_start.py`. Before that stage writes its manifest, it applies the shared `text_normalisation.normalize_text` rules to every transcript from every dataset. It does not alter the Miami `processed/` directory.
 
-When stage 2 completes, the matcher prints the clip-start review URL. The main outputs are:
+The pipeline then adds room-noise copies, followed by combined speed, pitch,
+random-amplitude, time-dropout, and room-reverb copies, before training. The
+main processing outputs are:
 
 - `processed_indonesia/01_segments.csv`
 - `processed_indonesia/02_processed.csv`
+- `processed_indonesia/03_dataset_with_augmented.csv`
+- `processed_indonesia/03_1_dataset_with_perturbations.csv`
 - `processed_indonesia/clip_start_matches.json`
 
 ## Processing once, named training runs
@@ -44,9 +48,11 @@ uv run --project processing python processing/05_train.py \
 - Development clips and metadata: `indonesian_data/indonesian_dev/clips/*.mp3` and `indonesian_data/indonesian_dev/metadata.tsv`
 - Common Voice evaluation clips: `indonesian_data/cv_indonesian/id/test.tsv` and `indonesian_data/cv_javanese/ss-corpus-jv.tsv`
 - Stage 1 output: source-aligned WAV clips in `processed_indonesia/01_segments/` and `processed_indonesia/01_segments.csv`
-- Stage 2 output: start-corrected Jember transcripts plus unchanged Indonesian development rows in `processed_indonesia/02_processed.csv`; detailed matching results are stored in `processed_indonesia/clip_start_matches.json`
+- Stage 2 output: start-corrected Jember rows and all other dataset rows, with every transcript normalized using `text_normalisation.normalize_text`, in `processed_indonesia/02_processed.csv`; detailed matching results are stored in `processed_indonesia/clip_start_matches.json`
+- Stage 3 output: original rows plus configured room-noise copies in `processed_indonesia/03_dataset_with_augmented.csv`
+- Stage 3.1 output: all stage-3 rows plus combined augmentation copies in `processed_indonesia/03_1_dataset_with_perturbations.csv`. The `speed_pitch` YAML section controls copies, speed range, random-amplitude gain, RIR directory, reverb wet-mix range, time-dropout probability/chunk sizes/counts, and random seed. Defaults are `0.7–1.3×`, `-12–+6 dB`, `15–55%` wet reverb, and a 50% chance of dropping 1–3 chunks of 50–200 ms. RIR convolution uses one randomly selected channel and a soft limiter prevents clipping.
 
-The VAD, normalization, evaluation, and training scripts remain available as standalone utilities, but `00_run_pipeline.py` does not invoke them.
+The VAD, audio-normalization, and evaluation scripts remain available as standalone utilities.
 
 The final `processed/train.csv` contains `audio_path`, `transcript`, `word_langids`, and `language_counts`. `word_langids` is a JSON array of `{ "word", "langid" }` objects, in the same order as the whitespace-separated transcript; `language_counts` is a JSON object that summarizes the retained labels. Intermediate manifests also retain `source_audio`, `start_ms`, `end_ms`, `speakers`, and `utterance_ids` for traceability.
 

@@ -171,6 +171,7 @@ def main() -> None:
         "--augment-workers", type=int, default=1,
         help="Number of concurrent audio workers used by stage 3.",
     )
+
     parser.add_argument(
         "--training-output-dir", type=Path,
         help=(
@@ -211,6 +212,9 @@ def main() -> None:
     processed_manifest = args.output_dir / "02_processed.csv"
     augmented_manifest = args.output_dir / "03_dataset_with_augmented.csv"
     augmented_audio_dir = args.output_dir / "03_augmented_audio"
+    perturbed_manifest = args.output_dir / "03_1_dataset_with_perturbations.csv"
+    perturbed_audio_dir = args.output_dir / "03_1_perturbed_audio"
+    perturbation_comparison = args.output_dir / "03_1_perturbation_comparison.csv"
     match_review = args.output_dir / "clip_start_matches.json"
 
     stage_1_args = [
@@ -308,8 +312,19 @@ def main() -> None:
         stage_3_args += ["--commonvoice-augmentation-multiplier", str(args.commonvoice_augmentation_multiplier)]
     run("03_augment_audio_with_noise.py", stage_3_args)
 
+    stage_3_1_args = [
+        "--input", str(augmented_manifest),
+        "--output", str(perturbed_manifest),
+        "--output-dir", str(perturbed_audio_dir),
+        "--comparison-output", str(perturbation_comparison),
+        "--rir-dir", str(args.noise_dir),
+    ]
+    if args.config is not None:
+        stage_3_1_args += ["--config", str(args.config)]
+    run("03_1_speed_pitch_volume_perturbations.py", stage_3_1_args)
+
     # Stage 5: model-specific LoRA fine-tuning. The selected trainer loads the
-    # train section directly; the stage-3 manifest is always wired explicitly
+    # train section directly; the stage-3.1 manifest is always wired explicitly
     # so processing and training cannot accidentally diverge.
     training_backend = str(train_values.get("backend", "whisper"))
     training_scripts = {
@@ -321,7 +336,7 @@ def main() -> None:
             f"Unsupported train.backend {training_backend!r}; choose one of "
             f"{', '.join(sorted(training_scripts))}"
         )
-    stage_5_args = ["--manifest", str(augmented_manifest)]
+    stage_5_args = ["--manifest", str(perturbed_manifest)]
     if args.config is not None:
         stage_5_args += ["--config", str(args.config)]
     if args.training_output_dir is not None:
@@ -340,6 +355,9 @@ def main() -> None:
             "clip_start_matches": "clip_start_matches.json",
             "augmented_manifest": "03_dataset_with_augmented.csv",
             "augmented_audio_dir": "03_augmented_audio/",
+            "perturbed_manifest": "03_1_dataset_with_perturbations.csv",
+            "perturbed_audio_dir": "03_1_perturbed_audio/",
+            "perturbation_comparison": "03_1_perturbation_comparison.csv",
             "training_output_dir": str(training_output_dir),
         },
     }, indent=2) + "\n", encoding="utf-8")

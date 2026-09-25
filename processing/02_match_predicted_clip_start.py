@@ -16,6 +16,7 @@ from typing import Callable
 from urllib.parse import quote
 
 from run_config import apply_defaults, load_section
+from text_normalisation import normalize_text
 
 
 MODEL_ID = "indonesian-nlp/wav2vec2-indonesian-javanese-sundanese"
@@ -236,7 +237,7 @@ def load_clips(clips_path: Path, output: Path) -> tuple[list[dict], int]:
 
 def write_processed_manifest(source: Path, output: Path,
                              results: list[dict]) -> tuple[int, int]:
-    """Write matched Jember rows plus unchanged non-Jember rows as CSV."""
+    """Write start-corrected rows with every transcript normalized."""
     with source.open(encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
         source_fields = list(reader.fieldnames or [])
@@ -299,6 +300,24 @@ def write_processed_manifest(source: Path, output: Path,
         })
         output_rows.append(row)
         processed_jember += 1
+
+    for row in output_rows:
+        normalized = normalize_text(row.get("transcript", "")).strip()
+        if not normalized:
+            raise ValueError(
+                "Transcript normalization produced an empty transcript for "
+                f"{row.get('audio_path', 'unknown audio')}"
+            )
+        words = normalized.split()
+        row.update({
+            "transcript": normalized,
+            "word_langids": json.dumps(
+                [{"word": word, "langid": "other"} for word in words],
+                ensure_ascii=False,
+            ),
+            "language_counts": json.dumps({"other": len(words)}),
+            "word_count": str(len(words)),
+        })
 
     output.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [*source_fields]
@@ -494,7 +513,8 @@ def main() -> None:
     )
     print(
         f"Wrote {processed_jember} corrected Jember clips and "
-        f"{unchanged_non_jember} unchanged non-Jember clips to {args.output_csv}"
+        f"{unchanged_non_jember} non-Jember clips with normalized transcripts "
+        f"to {args.output_csv}"
     )
     link = viewer_url("clip_start_word_match_review.html", "data", args.output)
     if link:

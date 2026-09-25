@@ -25,15 +25,15 @@ pipeline:
   start_match_model: indonesian-nlp/wav2vec2-indonesian-javanese-sundanese
   start_match_device: cuda
   noise_dir: indonesian_data/room_noises
-  jember_augmentation_multiplier: 0.1
+  jember_augmentation_multiplier: 0.5
   development_augmentation_multiplier: 2.0
-  commonvoice_augmentation_multiplier: 0.5
+  commonvoice_augmentation_multiplier: 1
   min_noise_fraction: 0.25
   max_noise_fraction: 0.75
   min_snr_db: 5.0
   max_snr_db: 20.0
   augmentation_seed: 1337
-  augment_workers: 16
+  augment_workers: 8
 
 prepare:
   output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/01_segments
@@ -49,7 +49,7 @@ prepare:
   development_max_clip_seconds: 30.0
   min_words: 2
   jember_stride_overlap_rows: 0
-  prepare_workers: 16
+  prepare_workers: 8
   reuse_existing: true
 
 augment:
@@ -57,18 +57,38 @@ augment:
   output: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/03_dataset_with_augmented.csv
   output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/03_augmented_audio
   noise_dir: indonesian_data/room_noises
-  jember_augmentation_multiplier: 0.1
+  jember_augmentation_multiplier: 0.5
   development_augmentation_multiplier: 2.0
-  commonvoice_augmentation_multiplier: 0.5
+  commonvoice_augmentation_multiplier: 1
   min_noise_fraction: 0.25
   max_noise_fraction: 0.75
   min_snr_db: 5.0
   max_snr_db: 20.0
   seed: 1337
-  workers: 16
+  workers: 8
+
+speed_pitch:
+  input: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/03_dataset_with_augmented.csv
+  output: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/03_1_dataset_with_perturbations.csv
+  output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/03_1_perturbed_audio
+  comparison_output: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/03_1_perturbation_comparison.csv
+  copies_per_row: 5
+  min_speed: 0.8
+  max_speed: 1.2
+  min_volume_gain_db: -12.0
+  max_volume_gain_db: 6.0
+  rir_dir: indonesian_data/room_noises
+  min_reverb_wet: 0.15
+  max_reverb_wet: 0.55
+  time_dropout_probability: 0.5
+  min_time_dropout_ms: 50
+  max_time_dropout_ms: 200
+  min_time_dropout_count: 1
+  max_time_dropout_count: 3
+  seed: 1337
 
 train:
-  manifest: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/03_dataset_with_augmented.csv
+  manifest: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/03_1_dataset_with_perturbations.csv
   output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200/05_train
   base_model: large-v3
   language: id
@@ -83,7 +103,7 @@ train:
   device: cuda
   eval_decode_batch_size: 3
   eval_total_clips: 99
-  jember_max_training_clips: 1200
+  jember_max_training_clips: 2400
   eval_jember_proportion: 25
   eval_commonvoice_proportion: 35
   eval_every_steps: 600
