@@ -6,6 +6,8 @@ import argparse
 import csv
 import json
 import random
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
@@ -15,6 +17,28 @@ import torchaudio
 from run_config import apply_defaults, load_section
 
 SAMPLE_RATE = 16_000
+
+
+@dataclass(frozen=True)
+class PerturbationJob:
+    row: dict[str, str]
+    output_dir: Path
+    rir_files: tuple[Path, ...]
+    copies_per_row: int
+    minimum_speed: float
+    maximum_speed: float
+    minimum_volume_gain_db: float
+    maximum_volume_gain_db: float
+    minimum_reverb_wet: float
+    maximum_reverb_wet: float
+    time_dropout_probability: float
+    minimum_time_dropout_ms: int
+    maximum_time_dropout_ms: int
+    minimum_time_dropout_count: int
+    maximum_time_dropout_count: int
+    seed: int
+
+
 METADATA_FIELDS = [
     "speed_augmented",
     "speed_factor",
@@ -182,8 +206,9 @@ def apply_room_reverb(
     return soft_limit((1 - wet) * waveform + wet * reverberant)
 
 
-def make_speed_copy(
+def make_perturbed_copy(
     row: dict[str, str],
+    source_waveform: torch.Tensor,
     output_dir: Path,
     factor: float,
     volume_gain_db: float,
@@ -199,7 +224,7 @@ def make_speed_copy(
     copy_number: int,
 ) -> dict[str, str]:
     source_path = Path(row["audio_path"])
-    waveform = perturb_speed_and_pitch(read_audio(source_path), factor)
+    waveform = perturb_speed_and_pitch(source_waveform, factor)
     waveform, applied_volume_gain_db = perturb_random_amplitude(
         waveform, volume_gain_db
     )
@@ -245,6 +270,64 @@ def make_speed_copy(
         )),
     })
     return augmented
+
+
+def sample_away_from(
+    rng: random.Random,
+    minimum: float,
+    maximum: float,
+    excluded_value: float,
+    minimum_distance: float,
+) -> float:
+    """Sample a value, avoiding an effectively unchanged augmentation."""
+    value = minimum
+    for _ in range(100):
+        value = rng.uniform(minimum, maximum)
+        if abs(value - excluded_value) >= minimum_distance:
+            break
+    return value
+
+
+def perturb_row(job: PerturbationJob) -> list[dict[str, str]]:
+    """Load one source once and produce all deterministic copies for that row."""
+    rng = random.Random(job.seed)
+    source_waveform = read_audio(Path(job.row["audio_path"]))
+    copies: list[dict[str, str]] = []
+    for copy_number in range(1, job.copies_per_row + 1):
+        factor = sample_away_from(
+            rng, job.minimum_speed, job.maximum_speed, 1.0, 0.01
+        )
+        volume_gain_db = sample_away_from(
+            rng,
+            job.minimum_volume_gain_db,
+            job.maximum_volume_gain_db,
+            0.0,
+            0.1,
+        )
+        copies.append(make_perturbed_copy(
+            job.row,
+            source_waveform,
+            job.output_dir,
+            factor,
+            volume_gain_db,
+            rng.choice(job.rir_files),
+            rng.uniform(job.minimum_reverb_wet, job.maximum_reverb_wet),
+            rng.randrange(2**31),
+            rng,
+            job.time_dropout_probability,
+            job.minimum_time_dropout_ms,
+            job.maximum_time_dropout_ms,
+            job.minimum_time_dropout_count,
+            job.maximum_time_dropout_count,
+            copy_number,
+        ))
+    return copies
+
+
+def configure_worker() -> None:
+    """Prevent each worker from spawning its own pool of Torch CPU threads."""
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
 
 
 def comparison_row(row: dict[str, str]) -> dict[str, str]:
@@ -336,6 +419,12 @@ def main() -> None:
     parser.add_argument("--min-time-dropout-count", type=int, default=1)
     parser.add_argument("--max-time-dropout-count", type=int, default=3)
     parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of source rows to perturb concurrently.",
+    )
     parser.add_argument("--limit", type=int, help="Perturb only the first N stage-03 rows.")
     apply_defaults(parser, config_values, config_args.config)
     args = parser.parse_args()
@@ -366,6 +455,8 @@ def main() -> None:
         parser.error("Time-dropout count must satisfy 1 <= min <= max")
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be at least 1")
+    if args.workers < 1:
+        parser.error("--workers must be at least 1")
 
     with args.input.open(encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
@@ -379,7 +470,6 @@ def main() -> None:
     except ValueError as error:
         parser.error(str(error))
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    rng = random.Random(args.seed)
     rows_to_augment = rows if args.limit is None else rows[:args.limit]
     original_rows: list[dict[str, str]] = []
     perturbed_rows: list[dict[str, str]] = []
@@ -399,43 +489,47 @@ def main() -> None:
             "time_dropout_total_ms": "0",
         })
         original_rows.append(original)
-    for index, row in enumerate(rows_to_augment, start=1):
-        for copy_number in range(1, args.copies_per_row + 1):
-            # Avoid an effectively unchanged copy when the interval crosses 1.0.
-            for _ in range(100):
-                factor = rng.uniform(args.min_speed, args.max_speed)
-                if abs(factor - 1.0) >= 0.01:
-                    break
-            for _ in range(100):
-                volume_gain_db = rng.uniform(
-                    args.min_volume_gain_db, args.max_volume_gain_db
-                )
-                if abs(volume_gain_db) >= 0.1:
-                    break
-            rir_path = rng.choice(rir_files)
-            reverb_wet = rng.uniform(args.min_reverb_wet, args.max_reverb_wet)
-            perturbed_rows.append(
-                make_speed_copy(
-                    row,
-                    args.output_dir,
-                    factor,
-                    volume_gain_db,
-                    rir_path,
-                    reverb_wet,
-                    rng.randrange(2**31),
-                    rng,
-                    args.time_dropout_probability,
-                    args.min_time_dropout_ms,
-                    args.max_time_dropout_ms,
-                    args.min_time_dropout_count,
-                    args.max_time_dropout_count,
-                    copy_number,
-                )
-            )
-        print(
-            f"[{index}/{len(rows_to_augment)}] audio perturbed "
-            f"{row['audio_path']}"
+    seed_rng = random.Random(args.seed)
+    jobs = [
+        PerturbationJob(
+            row=row,
+            output_dir=args.output_dir,
+            rir_files=tuple(rir_files),
+            copies_per_row=args.copies_per_row,
+            minimum_speed=args.min_speed,
+            maximum_speed=args.max_speed,
+            minimum_volume_gain_db=args.min_volume_gain_db,
+            maximum_volume_gain_db=args.max_volume_gain_db,
+            minimum_reverb_wet=args.min_reverb_wet,
+            maximum_reverb_wet=args.max_reverb_wet,
+            time_dropout_probability=args.time_dropout_probability,
+            minimum_time_dropout_ms=args.min_time_dropout_ms,
+            maximum_time_dropout_ms=args.max_time_dropout_ms,
+            minimum_time_dropout_count=args.min_time_dropout_count,
+            maximum_time_dropout_count=args.max_time_dropout_count,
+            seed=seed_rng.getrandbits(64),
         )
+        for row in rows_to_augment
+    ]
+    if args.workers == 1 or len(jobs) < 2:
+        results = map(perturb_row, jobs)
+        executor = None
+    else:
+        executor = ProcessPoolExecutor(
+            max_workers=min(args.workers, len(jobs)),
+            initializer=configure_worker,
+        )
+        results = executor.map(perturb_row, jobs, chunksize=1)
+    try:
+        for index, augmented_rows in enumerate(results, start=1):
+            perturbed_rows.extend(augmented_rows)
+            print(
+                f"[{index}/{len(jobs)}] audio perturbed "
+                f"{augmented_rows[0]['speed_augmentation_source_audio']}"
+            )
+    finally:
+        if executor is not None:
+            executor.shutdown()
 
     all_rows = original_rows + perturbed_rows
     fieldnames = input_fields + [field for field in METADATA_FIELDS if field not in input_fields]
@@ -455,7 +549,8 @@ def main() -> None:
     print(
         f"Wrote {len(original_rows)} existing + {len(perturbed_rows)} "
         f"augmented rows "
-        f"to {args.output}"
+        f"to {args.output} using {args.workers} "
+        f"worker{'s' if args.workers != 1 else ''}"
     )
     print(f"Wrote comparison manifest to {args.comparison_output}")
     link = viewer_url(args.comparison_output)
