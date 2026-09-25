@@ -1,0 +1,112 @@
+# Keep all Common Voice and Indonesian-development rows; cap Jember at 1200 rows.
+run_name: first_full_run_data_mix_commonvoice_jember_1200_allaugment
+
+pipeline:
+  output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200_allaugment
+  min_clip_seconds: 6.0
+  max_clip_seconds: 30.0
+  jember_min_clip_seconds: 10.0
+  jember_max_clip_seconds: 25.0
+  development_min_clip_seconds: 6.0
+  development_max_clip_seconds: 30.0
+  development_corrected_long_clips: indonesian_data/indonesian_dev/corrected_above30seconds_indonesian_dev.csv
+  development_corrected_long_audio_dir: indonesian_data/indonesian_dev/corrected_above30seconds_audio
+  commonvoice-clips-per-dataset: 300
+  commonvoice-code-switch-samples: 2000
+  commonvoice-seed: 1337
+  min_words: 2
+  jember_stride_overlap_rows: 0
+  prepare_workers: 16
+  reuse_existing: true
+  audio_seconds: 5.0
+  word_search_amount: 13
+  match_words: 2
+  closeness_metric: levenshtein
+  start_match_model: indonesian-nlp/wav2vec2-indonesian-javanese-sundanese
+  start_match_device: cuda
+  noise_dir: indonesian_data/room_noises
+  jember_augmentation_multiplier: 0.5
+  development_augmentation_multiplier: 2.0
+  commonvoice_augmentation_multiplier: 1
+  min_noise_fraction: 0.25
+  max_noise_fraction: 0.75
+  min_snr_db: 5.0
+  max_snr_db: 20.0
+  augmentation_seed: 1337
+  augment_workers: 8
+
+prepare:
+  output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200_allaugment/01_segments
+  manifest: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200_allaugment/01_segments.csv
+  commonvoice-clips-per-dataset: 300
+  commonvoice-code-switch-samples: 2000
+  commonvoice-seed: 1337
+  min_clip_seconds: 6.0
+  max_clip_seconds: 30.0
+  jember_min_clip_seconds: 10.0
+  jember_max_clip_seconds: 25.0
+  development_min_clip_seconds: 6.0
+  development_max_clip_seconds: 30.0
+  min_words: 2
+  jember_stride_overlap_rows: 0
+  prepare_workers: 8
+  reuse_existing: true
+
+augment:
+  input: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200_allaugment/02_processed.csv
+  output: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200_allaugment/03_dataset_with_augmented.csv
+  output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200_allaugment/03_augmented_audio
+  noise_dir: indonesian_data/room_noises
+  jember_augmentation_multiplier: 0.5
+  development_augmentation_multiplier: 2.0
+  commonvoice_augmentation_multiplier: 1
+  min_noise_fraction: 0.25
+  max_noise_fraction: 0.75
+  min_snr_db: 5.0
+  max_snr_db: 20.0
+  seed: 1337
+  workers: 8
+
+speed_pitch:
+  input: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200_allaugment/03_dataset_with_augmented.csv
+  output: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200_allaugment/03_1_dataset_with_perturbations.csv
+  output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200_allaugment/03_1_perturbed_audio
+  comparison_output: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200_allaugment/03_1_perturbation_comparison.csv
+  copies_per_row: 5
+  min_speed: 0.8
+  max_speed: 1.2
+  min_volume_gain_db: -12.0
+  max_volume_gain_db: 6.0
+  rir_dir: indonesian_data/room_noises
+  min_reverb_wet: 0.15
+  max_reverb_wet: 0.55
+  time_dropout_probability: 0.5
+  min_time_dropout_ms: 50
+  max_time_dropout_ms: 200
+  min_time_dropout_count: 1
+  max_time_dropout_count: 3
+  seed: 1337
+
+train:
+  manifest: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200_allaugment/03_1_dataset_with_perturbations.csv
+  output_dir: processed_indonesia/first_full_run_data_mix_commonvoice_jember_1200_allaugment/05_train
+  base_model: large-v3
+  language: id
+  epochs: 10
+  batch_size: 2
+  num_workers: 8
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.1
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  device: cuda
+  eval_decode_batch_size: 3
+  eval_total_clips: 99
+  jember_max_training_clips: 2400
+  eval_jember_proportion: 25
+  eval_commonvoice_proportion: 35
+  eval_every_steps: 600
+  wandb_project: indonesian-whisper-medium-lora
+  wandb_run_name: first-full-run-data-mix-commonvoice-jember-1200-allaugment
+  wandb_mode: online
